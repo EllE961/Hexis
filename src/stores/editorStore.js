@@ -152,26 +152,35 @@ export const useEditorStore = create((set, get) => ({
   // Set active tab
   setActiveTab: (filePath) => set({ activeTab: filePath }),
 
-  // Create a new empty file and open it in the editor
+  // Create a new empty file and open it in the editor.
+  // Uses the dedicated create_file command / /api/file/create endpoint,
+  // both of which refuse to clobber an existing file (409 / EEXIST).
+  // Returns { ok: true } or { ok: false, error } so callers can surface
+  // the error in the UI instead of silently failing.
   createFile: async (filePath) => {
     try {
       if (IS_TAURI) {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('write_file', { path: filePath, content: '' });
+        await invoke('create_file', { path: filePath, content: '' });
       } else {
-        await fetch('/api/file/create', {
+        const res = await fetch('/api/file/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: filePath }),
         });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || `HTTP ${res.status}`);
+        }
       }
     } catch (err) {
       console.error('Create file failed:', err);
-      return;
+      return { ok: false, error: err.message || String(err) };
     }
 
     // Open the newly created file in the editor
     await get().openFile(filePath);
+    return { ok: true };
   },
 
   // Delete a file from disk and close its tab

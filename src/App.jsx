@@ -216,7 +216,8 @@ export default function App() {
           placeholder: 'filename.ext',
           onSubmit: async (name) => {
             const filePath = targetGroup !== '.' ? `${targetGroup}/${name}` : name;
-            await ed.createFile(filePath);
+            const result = await ed.createFile(filePath);
+            if (result?.ok === false) return result.error || 'Create failed';
             setNameModal(null);
             refreshWorkspace();
           },
@@ -235,7 +236,8 @@ export default function App() {
           placeholder: 'folder-name',
           onSubmit: async (name) => {
             const folderPath = targetParent !== '.' ? `${targetParent}/${name}` : name;
-            await ed.createFolder(folderPath);
+            const result = await ed.createFolder(folderPath);
+            if (result?.ok === false) return result.error || 'Create folder failed';
             setNameModal(null);
             refreshWorkspace();
           },
@@ -923,12 +925,9 @@ export default function App() {
           onSubmit: async (newName) => {
             const newPath = parent ? `${parent}/${newName}` : newName;
             const result = await ed.renameFile(filePath, newPath);
+            if (result?.ok === false) return result.error || 'Rename failed';
             setNameModal(null);
-            if (result?.ok === false) {
-              alert(`Rename failed: ${result.error}`);
-            } else {
-              refreshWorkspace();
-            }
+            refreshWorkspace();
           },
         });
         break;
@@ -948,7 +947,8 @@ export default function App() {
           placeholder: 'filename.ext',
           onSubmit: async (name) => {
             const filePath = groupPath && groupPath !== '.' ? `${groupPath}/${name}` : name;
-            await ed.createFile(filePath);
+            const result = await ed.createFile(filePath);
+            if (result?.ok === false) return result.error || 'Create failed';
             setNameModal(null);
             refreshWorkspace();
           },
@@ -963,7 +963,8 @@ export default function App() {
           placeholder: 'folder-name',
           onSubmit: async (name) => {
             const folderPath = parentGroup && parentGroup !== '.' ? `${parentGroup}/${name}` : name;
-            await ed.createFolder(folderPath);
+            const result = await ed.createFolder(folderPath);
+            if (result?.ok === false) return result.error || 'Create folder failed';
             setNameModal(null);
             refreshWorkspace();
           },
@@ -976,7 +977,8 @@ export default function App() {
           initial: '',
           placeholder: 'filename.ext',
           onSubmit: async (name) => {
-            await ed.createFile(name);
+            const result = await ed.createFile(name);
+            if (result?.ok === false) return result.error || 'Create failed';
             setNameModal(null);
             refreshWorkspace();
           },
@@ -989,7 +991,8 @@ export default function App() {
           initial: '',
           placeholder: 'folder-name',
           onSubmit: async (name) => {
-            await ed.createFolder(name);
+            const result = await ed.createFolder(name);
+            if (result?.ok === false) return result.error || 'Create folder failed';
             setNameModal(null);
             refreshWorkspace();
           },

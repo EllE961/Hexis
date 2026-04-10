@@ -46,7 +46,9 @@ export default function NameInputModal({
 
   if (!open) return null;
 
-  const handleSubmit = () => {
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = async () => {
     const trimmed = value.trim();
     if (!trimmed) {
       setError('Name cannot be empty');
@@ -65,7 +67,24 @@ export default function NameInputModal({
       const err = validate(trimmed);
       if (err) { setError(err); return; }
     }
-    onSubmit(trimmed);
+    // Async onSubmit: may return a string error message to keep the
+    // modal open with the error displayed. Returning nothing / a truthy
+    // { ok: true } / undefined means success and the caller will close
+    // the modal via onClose.
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await onSubmit(trimmed);
+      if (typeof result === 'string' && result) {
+        setError(result);
+      } else if (result && result.ok === false) {
+        setError(result.error || 'Operation failed');
+      }
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleKey = (e) => {

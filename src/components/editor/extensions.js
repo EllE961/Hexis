@@ -514,32 +514,49 @@ function buildIndentGuides(state) {
     if (levels === 0) continue;
     // Determine "active" guide: matches the cursor's indent level
     const cursorActive = i === cursorLine;
+    // Pass the indent WIDTH as a CSS variable so the guide background stops
+    // at the end of the leading whitespace instead of tiling across the
+    // whole line. `levels * tabSize` = number of characters of leading ws.
+    const totalChars = levels * tabSize;
     builder.add(
       line.from,
       line.from,
       Decoration.line({
         class: cursorActive ? 'cm-hexis-indent cm-hexis-indent-active' : 'cm-hexis-indent',
-        attributes: { 'data-indent': String(levels) },
+        attributes: { style: `--hexis-indent-w: ${totalChars}ch` },
       }),
     );
   }
   return builder.finish();
 }
 
-// Static style for the indent guides — injected as theme
+// Static style for the indent guides — injected as theme.
+//
+// How this works:
+//   - `repeating-linear-gradient` draws a 1px vertical line every `tabSize` ch
+//   - `background-repeat: no-repeat` + `background-size: var(--hexis-indent-w)`
+//     CLIPS the pattern to just the leading whitespace width of each line
+//     (the CSS var is set per-line by buildIndentGuides based on that line's
+//     actual indent level). Lines with 2 levels show 2 bars; lines with 6
+//     show 6; lines with 0 show none.
+//   - `background-position: 12px 0` matches the `.cm-line` padding so the
+//     first bar sits at char column 0, not before it.
+//
+// Color stays subtle (12% alpha gray) so code contrast isn't disturbed.
+// Active line (cursor) gets a subtle amber tint.
 export const indentGuides = [
   indentGuideField,
   EditorView.theme({
     '.cm-hexis-indent': {
       backgroundImage:
-        'linear-gradient(to right, rgba(139, 148, 158, 0.18) 1px, transparent 1px)',
-      backgroundSize: 'calc(1ch * var(--hexis-indent, 2)) 100%',
-      backgroundRepeat: 'repeat-x',
+        'repeating-linear-gradient(to right, rgba(139, 148, 158, 0.14) 0, rgba(139, 148, 158, 0.14) 1px, transparent 1px, transparent calc(1ch * 2))',
+      backgroundRepeat: 'no-repeat',
+      backgroundSize: 'var(--hexis-indent-w, 0) 100%',
       backgroundPosition: '12px 0',
     },
     '.cm-hexis-indent-active': {
       backgroundImage:
-        'linear-gradient(to right, rgba(240, 160, 48, 0.45) 1px, transparent 1px)',
+        'repeating-linear-gradient(to right, rgba(240, 160, 48, 0.32) 0, rgba(240, 160, 48, 0.32) 1px, transparent 1px, transparent calc(1ch * 2))',
     },
   }),
 ];

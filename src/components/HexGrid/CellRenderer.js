@@ -23,8 +23,8 @@ const BORDER_STATES = {
   conflict:  { color: '#EF4444',  width: 2.5 },  // alarm — stays bold
   modified:  { color: '#F59E0B8C', width: 1.2 },  // subtle, 55% alpha amber
   staged:    { color: '#22C55E8C', width: 1.2 },  // subtle, 55% alpha green
+  untracked: { color: '#58A6FF8C', width: 1.2 },  // subtle, 55% alpha blue — new file
   clean:     { color: null,       width: 0 },
-  untracked: { color: null,       width: 0 },
   testFail:  { color: '#DC2626',  width: 2 },    // alarm — stays bold
 };
 
@@ -196,14 +196,19 @@ export function drawCell(ctx, file, x, y, sectionColor, zoomLevel, state = {}) {
   // === 5. GIT STATUS: tiny colored corner badge ===
   // A small (2.2px) dot at the top-right corner. This is the PRIMARY
   // "this cell is modified" signal — the border is deliberately subtle so
-  // hover/selection/group-highlight effects show through cleanly. The badge
-  // stays crisp + bright because it occupies ~8 pixels and doesn't compete
-  // with the ring/fill effects that layer around the cell perimeter.
-  if (gitStatus === 'modified' || gitStatus === 'staged') {
-    const badgeColor = gitStatus === 'modified' ? '#F59E0B' : '#22C55E';
+  // hover/selection/group-highlight effects show through cleanly. Color by
+  // state: amber = modified, green = staged, blue = untracked (new file),
+  // red = merge conflict.
+  const badgeColor =
+    gitStatus === 'modified' ? '#F59E0B' :
+    gitStatus === 'staged' ? '#22C55E' :
+    gitStatus === 'untracked' ? '#58A6FF' :
+    gitStatus === 'conflict' ? '#EF4444' :
+    null;
+  if (badgeColor) {
     const bx = x + s * 0.52;
     const by = y - s * 0.52;
-    // Outer soft halo (warm glow) — reads as a subtle hint at distance
+    // Outer soft halo — reads as a subtle hint at distance
     ctx.beginPath();
     ctx.arc(bx, by, 4.2, 0, Math.PI * 2);
     ctx.fillStyle = badgeColor + '30';  // 19% alpha halo

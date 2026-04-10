@@ -28,6 +28,7 @@ import NameInputModal from './components/modals/NameInputModal.jsx';
 import { useClipboardStore } from './stores/clipboardStore.js';
 import { useFileOpsHistoryStore } from './stores/fileOpsHistoryStore.js';
 import { useSelectionStore } from './stores/selectionStore.js';
+import { useLayoutAnchorsStore } from './stores/layoutAnchorsStore.js';
 import { W } from './theme/window-tokens.js';
 
 const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
@@ -176,10 +177,52 @@ export default function App() {
           setFiles(mappedFiles);
           setGroups(mappedGroups);
         }
+        // Also refresh git status so new/deleted files get their
+        // untracked/modified/staged borders + badges immediately
+        // instead of waiting for the 10s periodic poll.
+        try { useGitStore.getState().fetchStatus(); } catch {}
       } catch (err) {
         console.warn('[refreshWorkspace]', err);
       }
     }, 200);
+  }, []);
+
+  // ─── Optimistic local state patches ──────────────────────────────
+  // These let create/delete/move ops update the hex grid instantly
+  // without waiting for a full workspace re-scan. The backend call
+  // runs in parallel; on failure we rollback via refreshWorkspace.
+  const optimisticallyAddFile = useCallback((filePath, groupPath) => {
+    const name = filePath.split('/').pop();
+    const extension = name.includes('.') ? name.split('.').pop() : '';
+    setFiles(prev => {
+      if (prev.some(f => f.path === filePath)) return prev;
+      return [...prev, {
+        path: filePath,
+        name,
+        extension,
+        group_path: groupPath || '.',
+        size_bytes: 0,
+        is_landmark: false,
+        is_test: false,
+        is_config: ['json', 'yaml', 'yml', 'toml', 'env'].includes(extension),
+        gitStatus: 'untracked',
+      }];
+    });
+    // Fetch git status so the new file picks up its proper state
+    try { useGitStore.getState().fetchStatus(); } catch {}
+  }, []);
+
+  const optimisticallyAddFolder = useCallback((folderPath, parentPath) => {
+    setGroups(prev => {
+      if (prev.some(g => g.path === folderPath)) return prev;
+      const depth = folderPath.split('/').length - 1;
+      return [...prev, {
+        path: folderPath,
+        name: folderPath.split('/').pop(),
+        parent_path: parentPath && parentPath !== '.' ? parentPath : null,
+        depth,
+      }];
+    });
   }, []);
 
   // ─── Menu bar action router ────────────────────────────────────────
@@ -218,8 +261,8 @@ export default function App() {
             const filePath = targetGroup !== '.' ? `${targetGroup}/${name}` : name;
             const result = await ed.createFile(filePath);
             if (result?.ok === false) return result.error || 'Create failed';
+            optimisticallyAddFile(filePath, targetGroup);
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -238,8 +281,8 @@ export default function App() {
             const folderPath = targetParent !== '.' ? `${targetParent}/${name}` : name;
             const result = await ed.createFolder(folderPath);
             if (result?.ok === false) return result.error || 'Create folder failed';
+            optimisticallyAddFolder(folderPath, targetParent);
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -534,6 +577,12 @@ export default function App() {
     resolveWorkspace();
   }, [resolveWorkspace]);
 
+  // Sync the layout-anchors store with the active workspace so each
+  // workspace gets its own persisted set of group positions.
+  useEffect(() => {
+    useLayoutAnchorsStore.getState().setWorkspace(workspace || null);
+  }, [workspace]);
+
   // Load project. Re-runs whenever the workspace changes (Tauri folder
   // switch). Does nothing while no workspace is selected — the welcome
   // screen takes over the UI in that case.
@@ -732,7 +781,7 @@ export default function App() {
   // so the layout reflows instantly, then confirm with the backend.
   // On error we rollback by calling refreshWorkspace(). Every successful
   // move is pushed onto the undo stack.
-  const handleCellDrop = useCallback(async ({ kind, from, to }) => {
+  const handleCellDrop = useCallback(async ({ kind, from, to, dropTarget }) => {
     const ed = useEditorStore.getState();
     const history = useFileOpsHistoryStore.getState();
 
@@ -745,7 +794,6 @@ export default function App() {
 
       if (isMulti) {
         const targetGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '.';
-        const batchOps = [];
         // Optimistic patch for all selected files
         setFiles(prev => prev.map(f => {
           if (!sel.has(f.path)) return f;
@@ -753,24 +801,32 @@ export default function App() {
           const newPath = targetGroup !== '.' ? `${targetGroup}/${leaf}` : leaf;
           return { ...f, path: newPath, group_path: targetGroup };
         }));
-        // Confirm each move on the backend (serial to avoid conflicts)
-        let failed = 0;
-        for (const srcPath of selected) {
-          const leaf = srcPath.split('/').pop();
-          const destPath = targetGroup !== '.' ? `${targetGroup}/${leaf}` : leaf;
-          if (srcPath === destPath) continue;
-          const r = await ed.renameFile(srcPath, destPath);
-          if (r?.ok !== false) {
-            batchOps.push({ kind: 'move', fromPath: srcPath, toPath: destPath, entity: 'file' });
-          } else {
-            failed++;
-          }
-        }
+        // Parallel backend confirmations (bounded concurrency via Promise.all
+        // on the full batch — the backend handles concurrent rename calls fine
+        // since each move touches a different path).
+        const moves = selected
+          .map((srcPath) => {
+            const leaf = srcPath.split('/').pop();
+            const destPath = targetGroup !== '.' ? `${targetGroup}/${leaf}` : leaf;
+            return { srcPath, destPath };
+          })
+          .filter(m => m.srcPath !== m.destPath);
+        const results = await Promise.all(
+          moves.map(({ srcPath, destPath }) =>
+            ed.renameFile(srcPath, destPath).then(r => ({ srcPath, destPath, ok: r?.ok !== false }))
+              .catch(() => ({ srcPath, destPath, ok: false }))
+          ),
+        );
+        const batchOps = results
+          .filter(r => r.ok)
+          .map(r => ({ kind: 'move', fromPath: r.srcPath, toPath: r.destPath, entity: 'file' }));
+        const failed = results.filter(r => !r.ok).length;
         if (failed > 0) {
           console.warn(`Batch drop: ${failed} moves failed, refreshing`);
           refreshWorkspace();
         } else if (batchOps.length > 0) {
           history.push({ kind: 'batch', ops: batchOps });
+          try { useGitStore.getState().fetchStatus(); } catch {}
         }
         sel.clear();
         return;
@@ -787,8 +843,22 @@ export default function App() {
         refreshWorkspace();
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'file' });
+        // Don't re-scan — the optimistic patch is the truth.
+        // Just poll git for fresh status since the move may have changed it.
+        try { useGitStore.getState().fetchStatus(); } catch {}
       }
     } else if (kind === 'group') {
+      // Always persist the new user anchor at the drop coordinates
+      // (freeform placement). The tree change (if any) is separate.
+      const dt = dropTarget;
+      if (dt && typeof dt.q === 'number' && typeof dt.r === 'number') {
+        useLayoutAnchorsStore.getState().setAnchor(to, dt.q, dt.r);
+      }
+
+      // If the path didn't actually change (same parent, just visual
+      // reposition), we're done — no backend call needed.
+      if (from === to) return;
+
       // Optimistic patch: update the group's own path + every file/child whose
       // path starts with the old group path.
       const fromPrefix = from.endsWith('/') ? from : from + '/';
@@ -805,12 +875,22 @@ export default function App() {
         }
         return f;
       }));
+
+      // Migrate the anchor to the new path so the next render uses the
+      // correct key, then clear the old path's anchor.
+      const anchorStore = useLayoutAnchorsStore.getState();
+      if (dt && typeof dt.q === 'number' && typeof dt.r === 'number') {
+        anchorStore.setAnchor(to, dt.q, dt.r);
+      }
+      if (from !== to) anchorStore.clearAnchor(from);
+
       const result = await ed.moveFolder(from, to);
       if (result?.ok === false) {
         console.warn('Group drop failed, refreshing:', result.error);
         refreshWorkspace();
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'folder' });
+        try { useGitStore.getState().fetchStatus(); } catch {}
       }
     }
   }, [refreshWorkspace]);
@@ -926,8 +1006,13 @@ export default function App() {
             const newPath = parent ? `${parent}/${newName}` : newName;
             const result = await ed.renameFile(filePath, newPath);
             if (result?.ok === false) return result.error || 'Rename failed';
+            // Optimistic path update
+            const newGroup = newPath.includes('/') ? newPath.slice(0, newPath.lastIndexOf('/')) : '.';
+            setFiles(prev => prev.map(f =>
+              f.path === filePath ? { ...f, path: newPath, name: newPath.split('/').pop(), group_path: newGroup } : f,
+            ));
+            try { useGitStore.getState().fetchStatus(); } catch {}
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -935,8 +1020,17 @@ export default function App() {
       case 'delete': {
         const filePath = arg;
         if (!confirm(`Delete ${filePath}?`)) return;
-        await ed.deleteFile(filePath);
-        refreshWorkspace();
+        // Snapshot the file for rollback, then optimistically remove
+        const snapshot = files.find(f => f.path === filePath);
+        setFiles(prev => prev.filter(f => f.path !== filePath));
+        try {
+          await ed.deleteFile(filePath);
+          try { useGitStore.getState().fetchStatus(); } catch {}
+        } catch (err) {
+          // Rollback on failure
+          if (snapshot) setFiles(prev => [...prev, snapshot]);
+          alert(`Delete failed: ${err.message || err}`);
+        }
         break;
       }
       case 'newFile': {
@@ -949,8 +1043,8 @@ export default function App() {
             const filePath = groupPath && groupPath !== '.' ? `${groupPath}/${name}` : name;
             const result = await ed.createFile(filePath);
             if (result?.ok === false) return result.error || 'Create failed';
+            optimisticallyAddFile(filePath, groupPath);
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -965,8 +1059,8 @@ export default function App() {
             const folderPath = parentGroup && parentGroup !== '.' ? `${parentGroup}/${name}` : name;
             const result = await ed.createFolder(folderPath);
             if (result?.ok === false) return result.error || 'Create folder failed';
+            optimisticallyAddFolder(folderPath, parentGroup);
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -979,8 +1073,8 @@ export default function App() {
           onSubmit: async (name) => {
             const result = await ed.createFile(name);
             if (result?.ok === false) return result.error || 'Create failed';
+            optimisticallyAddFile(name, '.');
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -993,8 +1087,8 @@ export default function App() {
           onSubmit: async (name) => {
             const result = await ed.createFolder(name);
             if (result?.ok === false) return result.error || 'Create folder failed';
+            optimisticallyAddFolder(name, '.');
             setNameModal(null);
-            refreshWorkspace();
           },
         });
         break;
@@ -1019,8 +1113,26 @@ export default function App() {
       case 'deleteGroup': {
         const groupPath = arg;
         if (!confirm(`Delete folder "${groupPath}" and ALL its contents?`)) return;
-        await ed.deleteFolder(groupPath);
-        refreshWorkspace();
+        // Snapshot for rollback, then optimistically remove the group AND
+        // all files/sub-groups whose paths start with it.
+        const prefix = groupPath.endsWith('/') ? groupPath : groupPath + '/';
+        const snapshotFiles = files.filter(f => f.path === groupPath || f.path.startsWith(prefix));
+        const snapshotGroups = groups.filter(g => g.path === groupPath || g.path.startsWith(prefix));
+        setFiles(prev => prev.filter(f => !(f.path === groupPath || f.path.startsWith(prefix))));
+        setGroups(prev => prev.filter(g => !(g.path === groupPath || g.path.startsWith(prefix))));
+        try {
+          const r = await ed.deleteFolder(groupPath);
+          if (r?.ok === false) throw new Error(r.error || 'Delete failed');
+          // Clear the deleted group's anchor (and any descendants' anchors)
+          const anchorStore = useLayoutAnchorsStore.getState();
+          for (const g of snapshotGroups) anchorStore.clearAnchor(g.path);
+          try { useGitStore.getState().fetchStatus(); } catch {}
+        } catch (err) {
+          // Rollback
+          setFiles(prev => [...prev, ...snapshotFiles]);
+          setGroups(prev => [...prev, ...snapshotGroups]);
+          alert(`Delete failed: ${err.message || err}`);
+        }
         break;
       }
       case 'moveTo': {

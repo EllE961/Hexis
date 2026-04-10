@@ -419,9 +419,11 @@ app.post('/api/file/move', async (req, res) => {
   const result = await moveFile(from, to);
   if (result.error) return res.status(500).json(result);
 
-  // Update markdown links across the repo
+  // Update markdown links across the repo — UNLESS the move fell back
+  // to plain fs.rename for an untracked file. Untracked files can't have
+  // inbound markdown references yet, so the full-repo scan is wasted work.
   let updatedLinks = [];
-  if (updateLinks) {
+  if (updateLinks && !result.fallback) {
     try {
       updatedLinks = await updateMarkdownLinks(REPO_PATH, from, to, getGit());
     } catch (err) {
@@ -430,7 +432,7 @@ app.post('/api/file/move', async (req, res) => {
     }
   }
 
-  res.json({ ok: true, from, to, updatedLinks });
+  res.json({ ok: true, from, to, updatedLinks, fallback: !!result.fallback });
 });
 
 // ─── Git Read ───

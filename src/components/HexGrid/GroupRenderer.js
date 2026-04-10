@@ -512,7 +512,8 @@ export function drawGroupLabels(ctx, getSectionColor, zoomLevel, folders, hovere
 
     if (zoomLevel === 'satellite' && depth > 0) continue;
     if (zoomLevel === 'region' && depth > 1) continue;
-    if (folder.totalFiles === 0) continue;
+    // Always draw the label, even for empty groups — the user needs to see
+    // the group name above its always-hex ring to know what it is.
 
     const { name, labelX, labelY, x, y } = folder;
     const rawName = name === '.' ? 'root' : (name.charAt(0).toUpperCase() + name.slice(1));

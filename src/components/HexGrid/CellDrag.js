@@ -89,15 +89,15 @@ export function computeDropTarget(layout, drag, worldX, worldY) {
       return { kind: 'group', q: hex.q, r: hex.r, groupPath: targetGroup, status: 'invalid' };
     }
     if (!targetGroup) {
-      // Bare grid drop for a group — INVALID. Moving a group to the
-      // workspace root (un-nesting it) should be deliberate via the
-      // context menu's "Move Group Out To › Workspace root" action,
-      // not an accident from dropping slightly off-target.
-      return { kind: 'root', q: hex.q, r: hex.r, status: 'invalid' };
+      // Bare grid drop — freeform placement. Always valid: the anchor
+      // is updated to the drop position. If the group currently has a
+      // parent, it gets un-nested (moved to top level).
+      return { kind: 'freeform', q: hex.q, r: hex.r, status: 'valid' };
     }
     // Dropping into an existing group — already in it?
     if (parentOf(drag.path) === targetGroup) {
-      return { kind: 'group', q: hex.q, r: hex.r, groupPath: targetGroup, status: 'noop' };
+      // Same parent — still update the anchor (freeform position inside parent)
+      return { kind: 'group', q: hex.q, r: hex.r, groupPath: targetGroup, status: 'valid' };
     }
     return { kind: 'group', q: hex.q, r: hex.r, groupPath: targetGroup, status: 'valid' };
   }
@@ -119,7 +119,16 @@ export function computeDestinationPath(drag, dropTarget) {
   }
   if (drag.kind === 'group') {
     if (dropTarget.kind === 'root') return leaf;
+    if (dropTarget.kind === 'freeform') {
+      // Freeform bare-grid drop: move to top level
+      return leaf;
+    }
     if (dropTarget.kind === 'group' && dropTarget.groupPath) {
+      // If same parent, path is unchanged
+      const currentParent = parentOf(drag.path);
+      if (currentParent === dropTarget.groupPath) {
+        return drag.path; // no tree change
+      }
       return `${dropTarget.groupPath}/${leaf}`;
     }
   }

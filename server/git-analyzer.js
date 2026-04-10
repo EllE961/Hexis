@@ -215,15 +215,30 @@ export async function deleteBranch(name) {
 }
 
 export async function moveFile(fromPath, toPath) {
+  const destDir = dirname(resolve(repoRoot, toPath));
   try {
     // Ensure destination directory exists
-    const destDir = dirname(resolve(repoRoot, toPath));
     await mkdir(destDir, { recursive: true });
-
     await git.mv(fromPath, toPath);
     return { ok: true };
   } catch (err) {
-    return { error: err.message };
+    // Fallback: untracked files can't be git-mv'd. Use plain fs.rename.
+    // Returns { ok: true, fallback: true } so callers can skip the
+    // expensive markdown link update scan (untracked files can't have
+    // inbound refs by definition).
+    const msg = err?.message || '';
+    if (/not under version control/i.test(msg) || /did not match any file/i.test(msg)) {
+      try {
+        const { rename } = await import('fs/promises');
+        const fromFull = resolve(repoRoot, fromPath);
+        const toFull = resolve(repoRoot, toPath);
+        await rename(fromFull, toFull);
+        return { ok: true, fallback: true };
+      } catch (e2) {
+        return { error: e2.message || String(e2) };
+      }
+    }
+    return { error: msg };
   }
 }
 

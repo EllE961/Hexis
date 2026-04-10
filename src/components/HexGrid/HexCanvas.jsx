@@ -14,6 +14,7 @@ import { CellAnimator } from './CellAnimator.js';
 import { LayoutAnimator } from './LayoutAnimator.js';
 import { makeCellDragState, computeDropTarget, computeDestinationPath } from './CellDrag.js';
 import { useSearchStore } from '../../stores/searchStore.js';
+import { useLayoutAnchorsStore } from '../../stores/layoutAnchorsStore.js';
 
 const HEX_SIZE = 30; // global grid cell size
 const BG_COLOR = '#0D1117';
@@ -309,13 +310,16 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
 
   // ─── Layout ───
   // Content-hash memoization: skip recompute when the file/group paths
-  // + groupings are unchanged. Only structural changes invalidate the
-  // layout — git status, modified time, etc. do NOT cause recompute.
+  // + groupings + user anchors are unchanged. Only structural changes
+  // invalidate the layout — git status, modified time, etc. do NOT
+  // cause recompute.
   const layoutHashRef = useRef('');
+  const anchorsRevision = useLayoutAnchorsStore(s => s.revision);
+  const anchorsMap = useLayoutAnchorsStore(s => s.anchors);
   useEffect(() => {
     if (files.length === 0) return;
     // Cheap content hash — covers everything that affects layout
-    let hash = `${files.length}|${groups.length}`;
+    let hash = `${files.length}|${groups.length}|${anchorsRevision}`;
     for (const f of files) hash += `|${f.path}:${f.group_path || ''}${f.is_landmark ? '*' : ''}`;
     for (const g of groups) hash += `|${g.path}:${g.parent_path || ''}`;
     if (hash === layoutHashRef.current && layoutRef.current) {
@@ -328,7 +332,7 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     layoutHashRef.current = hash;
     // Snapshot OUTGOING positions so we can animate into the new layout
     layoutAnimatorRef.current.snapshot(layoutRef.current?.cells);
-    const layout = computeLayout(files, groups, HEX_SIZE);
+    const layout = computeLayout(files, groups, HEX_SIZE, anchorsMap);
     layoutRef.current = layout;
     // Begin transitioning from old positions to new ones
     layoutAnimatorRef.current.transition(layout.cells, performance.now());
@@ -358,7 +362,7 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       if (minX !== Infinity) vp.fitBounds(minX, minY, maxX, maxY, HEX_SIZE * 2);
     }
     forceRender(n => n + 1);
-  }, [files, groups]);
+  }, [files, groups, anchorsRevision, anchorsMap]);
 
   // ─── Sync bees with agents + activity ───
   useEffect(() => {
@@ -878,19 +882,23 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     //   - Shift → reserved for future multi-select
     if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
       const hit = hitTestRich(e);
-      // Label click on a group header → direct group drag (no Alt needed)
+      // Label click on a group header → direct group drag
       const labelGroup = !e.altKey && hit?.kind === 'group' && hit.fromLabel && hit.groupPath && hit.groupPath !== '.';
-      // Alt+click inside a group → group drag (fallback for when the label
-      // isn't visible or the user is hovering deep inside)
+      // Plain click on an EMPTY cell inside a real group → group drag.
+      // This lets users grab a group from anywhere in its territory, not
+      // just the tiny label. Empty cells can still be used for right-click
+      // context menu (New File Here etc).
+      const emptyGroupDrag = !e.altKey && hit?.kind === 'empty' && hit.groupPath && hit.groupPath !== '.';
+      // Alt+click inside a group → group drag (legacy fallback, kept for muscle memory)
       const altGroup = e.altKey && (hit?.kind === 'file' || hit?.kind === 'empty') && hit.groupPath && hit.groupPath !== '.';
       const fileDrag = !e.altKey && hit?.kind === 'file';
-      if (labelGroup || altGroup || fileDrag) {
+      if (labelGroup || emptyGroupDrag || altGroup || fileDrag) {
         const canvas = canvasRef.current;
         const vp = viewportRef.current;
         if (canvas && vp) {
           const pos = getMousePos(e, canvas);
           const world = vp.screenToWorld(pos.x, pos.y);
-          const isGroupDrag = labelGroup || altGroup;
+          const isGroupDrag = labelGroup || altGroup || emptyGroupDrag;
           cellDragRef.current = {
             active: false, // not yet active — waits for threshold
             kind: isGroupDrag ? 'group' : 'file',

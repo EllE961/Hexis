@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useGraphStore } from '../../hooks/useGraph.js';
-import { getNodeColor, getStatusColor, getSectionColor } from '../../utils/colors.js';
+import { getNodeColor, getStatusColor, getSectionColor } from '../utils/colors.js';
 import { colors } from '../../theme/tokens.js';
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';

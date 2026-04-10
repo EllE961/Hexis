@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useGraphStore } from '../../hooks/useGraph.js';
-import { getSectionColor } from '../../utils/colors.js';
+import { getSectionColor } from '../utils/colors.js';
 
 const MAP_W = 180;
 const MAP_H = 130;

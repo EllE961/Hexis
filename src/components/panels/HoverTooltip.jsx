@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useGraphStore } from '../../hooks/useGraph.js';
-import { getNodeColor, getStatusColor } from '../../utils/colors.js';
+import { getNodeColor, getStatusColor } from '../utils/colors.js';
 
 export default function HoverTooltip() {
   const hoveredId = useGraphStore(s => s.hoveredNode);

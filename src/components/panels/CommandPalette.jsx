@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useGraphStore } from '../../hooks/useGraph.js';
 import { colors } from '../../theme/tokens.js';
-import { getSectionColor } from '../../utils/colors.js';
+import { getSectionColor } from '../utils/colors.js';
 import { Search, Hash, CornerDownLeft } from 'lucide-react';
 
 function fuzzyMatch(query, text) {

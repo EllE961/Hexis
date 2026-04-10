@@ -13,7 +13,7 @@
  *   cascading pulse animation. Non-chain regions dim away.
  */
 
-import { hexToPixel, hexNeighbors } from '../../utils/hexMath.js';
+import { hexToPixel, hexNeighbors } from '../utils/hexMath.js';
 
 const HEX_SIZE = 30;
 const NEIGHBOR_TO_EDGE = [5, 0, 1, 2, 3, 4];

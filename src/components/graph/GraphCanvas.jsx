@@ -3,10 +3,10 @@ import ForceGraph2D from 'react-force-graph-2d';
 import { useGraphStore, isNodeVisible } from '../../hooks/useGraph.js';
 import { renderNode } from './NodeRenderer.js';
 import { drawHexBackground } from './HexBackground.js';
-import { getEdgeColor, hexToRgba, getSectionColor } from '../../utils/colors.js';
+import { getEdgeColor, hexToRgba, getSectionColor } from '../utils/colors.js';
 import { colors, HEX_SIZE } from '../../theme/tokens.js';
-import { computeHexLayout, pixelToHex } from '../../utils/hexLayout.js';
-import { hexToPixel } from '../../utils/hexGrid.js';
+import { computeHexLayout, pixelToHex } from '../utils/hexLayout.js';
+import { hexToPixel } from '../utils/hexGrid.js';
 
 const EDGE_TYPE_LABELS = {
   'markdown-link': 'link',

@@ -9,7 +9,7 @@
  * - Clean git status as colored corner badge
  */
 
-import { hexPath } from '../../utils/hexMath.js';
+import { hexPath } from '../utils/hexMath.js';
 
 const HEX_SIZE = 30;
 

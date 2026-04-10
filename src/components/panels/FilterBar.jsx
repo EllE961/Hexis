@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useGraphStore, isNodeVisible } from '../../hooks/useGraph.js';
 import { colors, statusColor } from '../../theme/tokens.js';
-import { getSectionColor } from '../../utils/colors.js';
+import { getSectionColor } from '../utils/colors.js';
 import {
   X, Clock, Link2, ShieldCheck, ChevronDown,
   FileType, Activity, Eye, Filter, EyeOff, Waypoints,

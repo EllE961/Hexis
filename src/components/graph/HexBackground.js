@@ -3,7 +3,7 @@
  * Only shows hex cells near occupied nodes, fading out further away.
  */
 
-import { hexToPixel, hexRing, hexDistance, drawHexCell } from '../../utils/hexGrid.js';
+import { hexToPixel, hexRing, hexDistance, drawHexCell } from '../utils/hexGrid.js';
 import { HEX_SIZE, colors } from '../../theme/tokens.js';
 
 /**

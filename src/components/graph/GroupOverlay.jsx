@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useGraphStore } from '../../hooks/useGraph.js';
-import { getSectionColor } from '../../utils/colors.js';
+import { getSectionColor } from '../utils/colors.js';
 
 function capitalize(str) {
   return str.charAt(0).toUpperCase() + str.slice(1);

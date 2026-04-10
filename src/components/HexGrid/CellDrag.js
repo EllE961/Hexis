@@ -17,7 +17,7 @@
  *   - Target is outside any group → 'valid' (move to root / top-level)
  */
 
-import { pixelToHex } from '../../utils/hexMath.js';
+import { pixelToHex } from '../utils/hexMath.js';
 
 const HEX_SIZE = 30;
 

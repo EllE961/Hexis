@@ -13,7 +13,7 @@
  * so the overlay composites on top of the base cells.
  */
 
-import { hexPath, hexToPixel } from '../../utils/hexMath.js';
+import { hexPath, hexToPixel } from '../utils/hexMath.js';
 
 const HEX_SIZE = 50;
 

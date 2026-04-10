@@ -1,6 +1,6 @@
 import { colors } from '../../theme/tokens.js';
-import { getNodeColor, getStatusColor, hexToRgba } from '../../utils/colors.js';
-import { drawIcon as drawSvgIcon } from '../../utils/icons.js';
+import { getNodeColor, getStatusColor, hexToRgba } from '../utils/colors.js';
+import { drawIcon as drawSvgIcon } from '../utils/icons.js';
 
 function getTier(node) {
   if (node.type === 'index' || node.label === 'README') return 1;

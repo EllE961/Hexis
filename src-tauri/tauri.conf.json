@@ -1,0 +1,68 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "Hexis",
+  "version": "0.1.0",
+  "identifier": "com.hexis.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Hexis",
+        "label": "main",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost data:; connect-src 'self' ipc: http://ipc.localhost https://api.anthropic.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg", "appimage", "deb"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Honeycomb hex-grid AI-native IDE",
+    "longDescription": "Hexis is a honeycomb hex-grid AI-native IDE that visualizes your codebase as an interactive graph.",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "pubkey": "",
+      "endpoints": [
+        "https://releases.hexis.dev/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "dialog": true
+    }
+  }
+}

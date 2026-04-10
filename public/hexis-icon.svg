@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="honeycomb" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B"/>
+      <stop offset="50%" style="stop-color:#E8920C"/>
+      <stop offset="100%" style="stop-color:#CC7A00"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFD770"/>
+      <stop offset="100%" style="stop-color:#E8920C"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#1A1408"/>
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#E8920C" stroke-width="3" opacity="0.3"/>
+  <!-- Main hexagon -->
+  <polygon points="256,56 430,156 430,356 256,456 82,356 82,156" fill="url(#honeycomb)" opacity="0.9"/>
+  <!-- Inner hexagon -->
+  <polygon points="256,116 380,186 380,326 256,396 132,326 132,186" fill="url(#inner)" opacity="0.3"/>
+  <!-- Center hex cell -->
+  <polygon points="256,186 306,216 306,276 256,306 206,276 206,216" fill="#FFD770" opacity="0.8"/>
+  <!-- Top-right cell -->
+  <polygon points="306,156 356,186 356,246 306,276 256,246 256,186" fill="#F59E0B" opacity="0.5"/>
+  <!-- Top-left cell -->
+  <polygon points="206,156 256,186 256,246 206,276 156,246 156,186" fill="#D4760A" opacity="0.5"/>
+  <!-- Bottom cell -->
+  <polygon points="256,276 306,306 306,366 256,396 206,366 206,306" fill="#CC7A00" opacity="0.5"/>
+  <!-- H letter -->
+  <text x="256" y="268" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="80" font-weight="800" fill="#1A1408" opacity="0.8">H</text>
+</svg>

@@ -1,0 +1,30 @@
+node_modules/
+dist/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.tmp
+.vscode/
+.idea/
+
+# Environment + secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Serena MCP cache (runtime state, not source)
+.serena/cache/
+.serena/project.local.yml
+
+# Hexis runtime memory — research reports are generated per-run.
+# learned.md is seeded conventions and IS versioned. Research reports
+# under research/ are runtime artifacts and should not pollute history.
+.hexis/memories/research/
+.hexis/memories/runs/
+.hexis/state-*.json

@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+/**
+ * Dark theme CSS — all color values come from the active Hexis theme.
+ *
+ * The theme system (src/theme/window-tokens.js) injects --hexis-* custom
+ * properties onto :root on startup. This file consumes them.
+ *
+ * To change the look: edit src/theme/window-tokens.js. DO NOT hardcode colors here.
+ */
+
+@theme {
+  /* Tailwind semantic colors reference the live theme vars */
+  --color-bg-deep:      var(--hexis-bg0);
+  --color-bg-base:      var(--hexis-bg1);
+  --color-bg-surface:   var(--hexis-bg2);
+  --color-bg-elevated:  var(--hexis-bg3);
+  --color-bg-overlay:   var(--hexis-bg4);
+
+  --color-text-primary:    var(--hexis-text);
+  --color-text-secondary:  var(--hexis-textDim);
+  --color-text-tertiary:   var(--hexis-textMuted);
+
+  --color-accent:        var(--hexis-accent);
+  --color-accent-hover:  var(--hexis-accentHover);
+
+  --color-border:        var(--hexis-border);
+  --color-border-hover:  var(--hexis-borderHi);
+
+  --color-healthy:  var(--hexis-green);
+  --color-warning:  var(--hexis-yellow);
+  --color-error:    var(--hexis-red);
+}
+
+/* Fallback values (used before JS runs, or if JS disabled) */
+:root {
+  --hexis-bg0: #0B0F14;
+  --hexis-bg1: #12171F;
+  --hexis-bg2: #1A2029;
+  --hexis-bg3: #242C38;
+  --hexis-bg4: #2E3744;
+  --hexis-text: #E6EDF3;
+  --hexis-textDim: #A8B3BE;
+  --hexis-textMuted: #6E7A89;
+  --hexis-textGhost: #4A5360;
+  --hexis-accent: #F0A030;
+  --hexis-accentHover: rgba(240, 160, 48, 0.25);
+  --hexis-accentSoft: rgba(240, 160, 48, 0.15);
+  --hexis-accentBg: rgba(240, 160, 48, 0.08);
+  --hexis-border: rgba(166, 180, 196, 0.12);
+  --hexis-borderSubtle: rgba(166, 180, 196, 0.06);
+  --hexis-borderHi: rgba(240, 160, 48, 0.5);
+  --hexis-green: #3FB950;
+  --hexis-red: #F85149;
+  --hexis-blue: #58A6FF;
+  --hexis-yellow: #D4A017;
+  --hexis-purple: #A855F7;
+  --hexis-teal: #14B8A6;
+}
+
+/* Base — dark developer theme */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--hexis-bg0);
+  color: var(--hexis-text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+canvas {
+  image-rendering: auto;
+}
+
+/* Scrollbar — uses theme tokens */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--hexis-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--hexis-borderHi); }
+
+/* Transitions */
+.transition-panel {
+  transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 200ms cubic-bezier(0.0, 0.0, 0.2, 1);
+}
+
+.transition-fast {
+  transition: all 120ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+/* Hex clip-path for buttons */
+.hex-clip {
+  clip-path: polygon(5% 0%, 95% 0%, 100% 50%, 95% 100%, 5% 100%, 0% 50%);
+}
+
+/* Glow effects */
+.glow-accent {
+  box-shadow: 0 0 8px var(--hexis-accentHover), 0 0 20px var(--hexis-accentSoft);
+}
+.glow-healthy {
+  box-shadow: 0 0 8px rgba(63, 185, 80, 0.3), 0 0 20px rgba(63, 185, 80, 0.15);
+}
+.glow-error {
+  box-shadow: 0 0 8px rgba(248, 81, 73, 0.3), 0 0 20px rgba(248, 81, 73, 0.15);
+}
+
+/* Selection */
+::selection {
+  background: var(--hexis-accentHover);
+  color: var(--hexis-text);
+}

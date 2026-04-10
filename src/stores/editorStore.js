@@ -194,22 +194,30 @@ export const useEditorStore = create((set, get) => ({
     get().closeTab(filePath);
   },
 
-  // Rename/move a file and update its tab
+  // Rename/move a file and update its tab.
+  //
+  // Server endpoint expects { from, to }; Tauri command expects
+  // { oldPath, newPath } (its param names). We map both correctly.
+  // Returns { ok, error? } so callers can rollback optimistic updates.
   renameFile: async (oldPath, newPath) => {
     try {
       if (IS_TAURI) {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('rename_file', { oldPath, newPath });
       } else {
-        await fetch('/api/file/move', {
+        const res = await fetch('/api/file/move', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ oldPath, newPath }),
+          body: JSON.stringify({ from: oldPath, to: newPath }),
         });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
       }
     } catch (err) {
       console.error('Rename file failed:', err);
-      return;
+      return { ok: false, error: err.message || String(err) };
     }
 
     const newName = newPath.split('/').pop();
@@ -224,6 +232,89 @@ export const useEditorStore = create((set, get) => ({
       activeTab: get().activeTab === oldPath ? newPath : get().activeTab,
       recentFiles: get().recentFiles.map(p => p === oldPath ? newPath : p),
     });
+    return { ok: true };
+  },
+
+  // ─── Folder operations (for drag-drop of groups + context menus) ───
+
+  createFolder: async (folderPath) => {
+    try {
+      if (IS_TAURI) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('create_folder', { path: folderPath });
+      } else {
+        const res = await fetch('/api/folder/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: folderPath }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      console.error('Create folder failed:', err);
+      return { ok: false, error: err.message || String(err) };
+    }
+  },
+
+  moveFolder: async (from, to) => {
+    try {
+      if (IS_TAURI) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('move_folder', { from, to });
+      } else {
+        const res = await fetch('/api/folder/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from, to }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+      }
+      // Close any open tabs whose path was under the old folder
+      const prefix = from.endsWith('/') ? from : from + '/';
+      set({
+        tabs: get().tabs.map(t =>
+          t.path === from || t.path.startsWith(prefix)
+            ? { ...t, path: t.path.replace(from, to) }
+            : t
+        ),
+      });
+      return { ok: true };
+    } catch (err) {
+      console.error('Move folder failed:', err);
+      return { ok: false, error: err.message || String(err) };
+    }
+  },
+
+  deleteFolder: async (folderPath) => {
+    try {
+      if (IS_TAURI) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('delete_folder', { path: folderPath });
+      } else {
+        const res = await fetch(`/api/folder?path=${encodeURIComponent(folderPath)}&recursive=true`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+      }
+      // Close any tabs under the deleted folder
+      const prefix = folderPath.endsWith('/') ? folderPath : folderPath + '/';
+      const toClose = get().tabs.filter(t => t.path === folderPath || t.path.startsWith(prefix));
+      for (const t of toClose) get().closeTab(t.path);
+      return { ok: true };
+    } catch (err) {
+      console.error('Delete folder failed:', err);
+      return { ok: false, error: err.message || String(err) };
+    }
   },
 
   // Re-read file content from disk (for external changes)

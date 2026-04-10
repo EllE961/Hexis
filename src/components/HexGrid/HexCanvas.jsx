@@ -7,10 +7,12 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import { Viewport } from './Viewport.js';
 import { hexToPixel, pixelToHex, getVisibleHexRange, isHexVisible, hexNeighbors, hexPath } from '../../utils/hexMath.js';
 import { computeLayout } from '../../utils/hexLayout.js';
-import { drawCell } from './CellRenderer.js';
+import { drawCell, drawEmptyCell } from './CellRenderer.js';
 import { drawGroups, drawGroupLabels, drawGroupHighlight, drawBreadcrumbSpine } from './GroupRenderer.js';
 import { BeeSystem } from './BeeSystem.js';
 import { CellAnimator } from './CellAnimator.js';
+import { LayoutAnimator } from './LayoutAnimator.js';
+import { makeCellDragState, computeDropTarget, computeDestinationPath } from './CellDrag.js';
 import { useSearchStore } from '../../stores/searchStore.js';
 
 const HEX_SIZE = 30; // global grid cell size
@@ -121,7 +123,7 @@ function drawFlightPlan(ctx, subtasks, layout, hiveX, hiveY) {
   ctx.restore();
 }
 
-export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClick, onCellHover, onBeeClick, selectedCell, cellActivity, activeAgents, pendingPlan }) {
+export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClick, onCellHover, onCellContextMenu, onCellDrop, onOSDrop, onBeeClick, selectedCell, selectedCells, cellActivity, activeAgents, pendingPlan }) {
   const canvasRef = useRef(null);
   const viewportRef = useRef(null);
   const layoutRef = useRef(null);
@@ -132,11 +134,16 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
   const initialFitDoneRef = useRef(false);
   const beeSystemRef = useRef(new BeeSystem());
   const cellAnimatorRef = useRef(new CellAnimator());
+  const layoutAnimatorRef = useRef(new LayoutAnimator());
   const prevActivityRef = useRef(new Map());
   // Hover chain pulse state: which innermost group is active and when it started
   const hoverPulseRef = useRef({ innermost: null, startTime: 0 });
   // Search match cache — updated on every search store change; read by render loop
   const searchMatchesRef = useRef({ map: new Map(), startTime: 0 });
+  // Cell/group drag state. All drag coordinates + drop target live in
+  // this ref so the render loop can read them each frame WITHOUT causing
+  // React re-renders during drag. Populated by onPointerDown/Move/Up.
+  const cellDragRef = useRef(makeCellDragState());
   const [, forceRender] = useState(0);
 
   // Neutral stone tone for root-level files — they are not a group,
@@ -226,11 +233,105 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     return () => ro.disconnect();
   }, []);
 
+  // ─── OS drag-in (files dropped from File Explorer / Finder) ───
+  // Tauri v2 fires window-level drag-drop events with absolute paths.
+  // Web mode uses native HTML DataTransfer. Both report the target
+  // group via hitTestRich so files land in the group under the cursor.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !onOSDrop) return;
+
+    const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
+
+    // Helper: translate a screen coordinate to a target group path
+    const groupAtScreen = (clientX, clientY) => {
+      const vp = viewportRef.current;
+      const layout = layoutRef.current;
+      if (!vp || !layout) return '.';
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      const world = vp.screenToWorld(x, y);
+      const hex = pixelToHex(world.x, world.y, HEX_SIZE);
+      const owner = layout.cellOwner?.get(`${hex.q},${hex.r}`);
+      if (owner?.kind === 'empty') return owner.groupPath || '.';
+      if (owner?.kind === 'file') {
+        const file = layout._fileMap?.get(owner.filePath);
+        return file?.group_path || '.';
+      }
+      return '.';
+    };
+
+    if (IS_TAURI) {
+      // Tauri path: listen for onDragDropEvent
+      let unlisten = null;
+      (async () => {
+        try {
+          const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+          const win = getCurrentWebviewWindow();
+          unlisten = await win.onDragDropEvent((event) => {
+            if (event.payload.type !== 'drop') return;
+            const paths = event.payload.paths || [];
+            if (!paths.length) return;
+            // Tauri drop positions are { x, y } in CSS pixels from the
+            // window's top-left. Use them to find the target group.
+            const pos = event.payload.position || { x: 0, y: 0 };
+            const targetGroup = groupAtScreen(pos.x, pos.y);
+            onOSDrop({ kind: 'tauri', paths, targetGroup });
+          });
+        } catch (err) {
+          console.warn('[os-drop] Tauri listener failed:', err);
+        }
+      })();
+      return () => { if (unlisten) { try { unlisten(); } catch {} } };
+    }
+
+    // Web path: DOM drag events on the canvas element
+    const onDragOver = (e) => {
+      if (!e.dataTransfer?.types?.includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    };
+    const onDrop = async (e) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      const targetGroup = groupAtScreen(e.clientX, e.clientY);
+      const files = Array.from(e.dataTransfer.files);
+      onOSDrop({ kind: 'web', files, targetGroup });
+    };
+    canvas.addEventListener('dragover', onDragOver);
+    canvas.addEventListener('drop', onDrop);
+    return () => {
+      canvas.removeEventListener('dragover', onDragOver);
+      canvas.removeEventListener('drop', onDrop);
+    };
+  }, [onOSDrop]);
+
   // ─── Layout ───
+  // Content-hash memoization: skip recompute when the file/group paths
+  // + groupings are unchanged. Only structural changes invalidate the
+  // layout — git status, modified time, etc. do NOT cause recompute.
+  const layoutHashRef = useRef('');
   useEffect(() => {
     if (files.length === 0) return;
+    // Cheap content hash — covers everything that affects layout
+    let hash = `${files.length}|${groups.length}`;
+    for (const f of files) hash += `|${f.path}:${f.group_path || ''}${f.is_landmark ? '*' : ''}`;
+    for (const g of groups) hash += `|${g.path}:${g.parent_path || ''}`;
+    if (hash === layoutHashRef.current && layoutRef.current) {
+      // Same inputs — nothing to do. Refresh _fileMap references
+      // in case file objects themselves were mutated (git status enrichment).
+      layoutRef.current._fileMap = new Map();
+      for (const f of files) layoutRef.current._fileMap.set(f.path, f);
+      return;
+    }
+    layoutHashRef.current = hash;
+    // Snapshot OUTGOING positions so we can animate into the new layout
+    layoutAnimatorRef.current.snapshot(layoutRef.current?.cells);
     const layout = computeLayout(files, groups, HEX_SIZE);
     layoutRef.current = layout;
+    // Begin transitioning from old positions to new ones
+    layoutAnimatorRef.current.transition(layout.cells, performance.now());
     // Pre-build file map
     layout._fileMap = new Map();
     for (const f of files) layout._fileMap.set(f.path, f);
@@ -417,6 +518,9 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
         return -1;
       }
 
+      const nowMs = performance.now();
+      const layoutAnim = layoutAnimatorRef.current;
+
       for (const [filePath, cell] of layout.cells) {
         if (!isHexVisible(cell.q, cell.r, hexRange)) continue;
         const file = layout._fileMap?.get(filePath);
@@ -424,6 +528,11 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
         const color = getSectionColor(file.group_path || '.');
         const agentState = cellActivity?.get(filePath);
         const anim = animator.get(filePath);
+
+        // Interpolated position for reflow animation
+        const pos = layoutAnim.positionFor(filePath, cell, nowMs);
+        const drawX = pos.x;
+        const drawY = pos.y;
 
         // Chain-depth dimming: cells in the innermost focused group stay full
         // bright; each containing ancestor dims a step; unrelated cells fade hard.
@@ -441,12 +550,12 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
         // Apply scale animation
         if (anim.scale !== 1) {
           ctx.save();
-          ctx.translate(cell.x, cell.y);
+          ctx.translate(drawX, drawY);
           ctx.scale(anim.scale, anim.scale);
-          ctx.translate(-cell.x, -cell.y);
+          ctx.translate(-drawX, -drawY);
         }
 
-        drawCell(ctx, file, cell.x, cell.y, color, zoomLevel, {
+        drawCell(ctx, file, drawX, drawY, color, zoomLevel, {
           selected: selectedCell === filePath,
           hovered: hoveredCellRef.current === filePath,
           gitStatus: file.gitStatus || null,
@@ -462,12 +571,59 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
 
         // Save flash overlay
         if (anim.saveFlash > 0.01) {
-          hexPath(ctx, cell.x, cell.y, HEX_SIZE * 0.92);
+          hexPath(ctx, drawX, drawY, HEX_SIZE * 0.92);
           ctx.fillStyle = `rgba(107, 142, 35, ${anim.saveFlash * 0.25})`;
           ctx.fill();
         }
+
+        // Multi-select highlight ring
+        if (selectedCells && selectedCells.has && selectedCells.has(filePath) && selectedCells.size > 1) {
+          const pulse = Math.sin(nowMs * 0.004) * 0.2 + 0.8;
+          hexPath(ctx, drawX, drawY, HEX_SIZE * 1.02);
+          ctx.strokeStyle = `rgba(88, 166, 255, ${pulse})`;
+          ctx.lineWidth = 2.2;
+          ctx.setLineDash([]);
+          ctx.stroke();
+          // Small badge showing selection count — only on the first one drawn
+        }
       }
 
+
+      // 3b. Empty-cell placeholders — walk cellOwner for kind:'empty'.
+      //     These are the drag-drop targets inside partially-filled groups
+      //     and the "always-hex" filler that keeps every group a full ring.
+      //     Skipped at satellite zoom; drawEmptyCell handles region/city
+      //     visual levels internally.
+      if (layout.cellOwner && zoomLevel !== 'satellite') {
+        const dropTarget = cellDragRef.current?.active ? cellDragRef.current.dropTarget : null;
+        for (const [key, owner] of layout.cellOwner) {
+          if (owner.kind !== 'empty') continue;
+          const [q, r] = key.split(',').map(Number);
+          if (!isHexVisible(q, r, hexRange)) continue;
+          const pos = hexToPixel(q, r, HEX_SIZE);
+          const color = getSectionColor(owner.groupPath);
+          // Apply same chain-depth dimming as files so non-chain groups'
+          // empty cells fade the same way during hover focus.
+          let alpha = 1;
+          if (hoveredChain.length > 0) {
+            const cIdx = chainIndexForFile(owner.groupPath);
+            if (cIdx >= 0) {
+              alpha = chainAlphaByDepth[Math.min(cIdx, chainAlphaByDepth.length - 1)];
+            } else {
+              const top = owner.groupPath.split('/')[0];
+              alpha = (top === chainTopLevel) ? 0.18 : 0.08;
+            }
+          }
+          const isDrop =
+            dropTarget &&
+            dropTarget.q === q &&
+            dropTarget.r === r &&
+            dropTarget.kind !== 'invalid';
+          ctx.globalAlpha = alpha;
+          drawEmptyCell(ctx, pos.x, pos.y, color, zoomLevel, { dropTarget: isDrop });
+          ctx.globalAlpha = 1;
+        }
+      }
 
       // 4. Group labels (ON TOP of cells) — show ancestor chain labels with
       //    cascading fade-in (outer first, inner last).
@@ -538,6 +694,40 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
         }
       }
 
+      // 4d. Drag ghost — if a cell/group is being dragged, draw a
+      //     semi-transparent copy of the source at the cursor position.
+      //     The drop target highlight is already handled above in the
+      //     empty-cell pass (via cellDragRef.current.dropTarget).
+      const drag = cellDragRef.current;
+      if (drag.active) {
+        ctx.save();
+        ctx.globalAlpha = 0.75;
+        const file = layout._fileMap?.get(drag.path);
+        if (file) {
+          const color = getSectionColor(file.group_path || '.');
+          drawCell(ctx, file, drag.currentX, drag.currentY, color, zoomLevel, {
+            hovered: true, selected: false, gitStatus: null,
+          });
+        } else if (drag.kind === 'group') {
+          // Group drag — draw a labelled hex indicator at the cursor
+          const color = getSectionColor(drag.path);
+          hexPath(ctx, drag.currentX, drag.currentY, HEX_SIZE * 0.95);
+          ctx.fillStyle = color + '55';
+          ctx.fill();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.fillStyle = '#E6EDF3';
+          ctx.font = '600 11px Inter, system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const label = drag.path.split('/').pop() || drag.path;
+          ctx.fillText(label, drag.currentX, drag.currentY);
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+
       // 5. Update bee viewport bounds + render
       const bees = beeSystemRef.current;
       bees.setViewBounds(bounds);
@@ -570,6 +760,68 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     const world = vp.screenToWorld(pos.x, pos.y);
     const hex = pixelToHex(world.x, world.y, HEX_SIZE);
     return layout.occupancy.get(`${hex.q},${hex.r}`) || null;
+  }
+
+  // Rich hit test — returns the FULL hit shape for right-click menus
+  // and drag-and-drop. Kinds:
+  //   - 'file'  → a file cell at (q,r) with filePath + its groupPath
+  //   - 'empty' → an empty slot inside a group at (q,r) with groupPath
+  //   - 'group' → a point inside a group's region but on its LABEL area
+  //              (same as empty for now; reserved for future)
+  //   - 'none'  → outside all groups and not on any cell
+  function hitTestRich(e) {
+    const canvas = canvasRef.current;
+    const vp = viewportRef.current;
+    const layout = layoutRef.current;
+    if (!canvas || !vp || !layout) return { kind: 'none' };
+    const pos = getMousePos(e, canvas);
+    const world = vp.screenToWorld(pos.x, pos.y);
+
+    // First, check group LABEL rects (in world space). Labels are drawn
+    // ABOVE each group hex so they're typically outside any cell, but we
+    // check them first so a click on a label doesn't get stolen by a
+    // neighboring cell. Iterate deepest-depth-first so nested labels win.
+    if (layout.folders) {
+      const foldersByDepth = [...layout.folders.values()].sort((a, b) => (b.depth || 0) - (a.depth || 0));
+      for (const folder of foldersByDepth) {
+        const r = folder.labelRect;
+        if (!r) continue;
+        if (world.x >= r.x && world.x <= r.x + r.w &&
+            world.y >= r.y && world.y <= r.y + r.h) {
+          return {
+            kind: 'group',
+            groupPath: folder.path,
+            q: folder.cq,
+            r: folder.cr,
+            fromLabel: true,
+          };
+        }
+      }
+    }
+
+    const hex = pixelToHex(world.x, world.y, HEX_SIZE);
+    const key = `${hex.q},${hex.r}`;
+    const owner = layout.cellOwner?.get(key);
+    if (owner?.kind === 'file') {
+      // Resolve owning group from the file metadata
+      const file = layout._fileMap?.get(owner.filePath);
+      return {
+        kind: 'file',
+        filePath: owner.filePath,
+        groupPath: file?.group_path || '.',
+        q: hex.q,
+        r: hex.r,
+      };
+    }
+    if (owner?.kind === 'empty') {
+      return {
+        kind: 'empty',
+        groupPath: owner.groupPath,
+        q: hex.q,
+        r: hex.r,
+      };
+    }
+    return { kind: 'none', q: hex.q, r: hex.r };
   }
 
   // Hit test for a bee at screen coords
@@ -619,6 +871,52 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       return;
     }
 
+    // Check if we're grabbing a cell. Modifier rules:
+    //   - plain click → file drag (if on a file) — wait for threshold
+    //   - Alt+click on file/empty → GROUP drag (drags the group containing the cell)
+    //   - Ctrl/Cmd → reserved for go-to-def, no drag
+    //   - Shift → reserved for future multi-select
+    if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      const hit = hitTestRich(e);
+      // Label click on a group header → direct group drag (no Alt needed)
+      const labelGroup = !e.altKey && hit?.kind === 'group' && hit.fromLabel && hit.groupPath && hit.groupPath !== '.';
+      // Alt+click inside a group → group drag (fallback for when the label
+      // isn't visible or the user is hovering deep inside)
+      const altGroup = e.altKey && (hit?.kind === 'file' || hit?.kind === 'empty') && hit.groupPath && hit.groupPath !== '.';
+      const fileDrag = !e.altKey && hit?.kind === 'file';
+      if (labelGroup || altGroup || fileDrag) {
+        const canvas = canvasRef.current;
+        const vp = viewportRef.current;
+        if (canvas && vp) {
+          const pos = getMousePos(e, canvas);
+          const world = vp.screenToWorld(pos.x, pos.y);
+          const isGroupDrag = labelGroup || altGroup;
+          cellDragRef.current = {
+            active: false, // not yet active — waits for threshold
+            kind: isGroupDrag ? 'group' : 'file',
+            path: isGroupDrag ? hit.groupPath : hit.filePath,
+            sourceGroupPath: hit.groupPath,
+            startX: world.x,
+            startY: world.y,
+            currentX: world.x,
+            currentY: world.y,
+            dropTarget: null,
+            screenStartX: e.clientX,
+            screenStartY: e.clientY,
+          };
+          mouseDownRef.current = {
+            startX: e.clientX, startY: e.clientY,
+            lastX: e.clientX, lastY: e.clientY,
+            dragged: false,
+            beeMode: false,
+            cellMode: true, // potential cell drag (activates on threshold)
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+          return;
+        }
+      }
+    }
+
     // Otherwise, normal pan/click behavior
     mouseDownRef.current = {
       startX: e.clientX, startY: e.clientY,
@@ -632,6 +930,34 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
 
   const onPointerMove = useCallback((e) => {
     const down = mouseDownRef.current;
+
+    // Cell drag mode — 4px threshold, then track cursor + compute drop target.
+    // All state lives in cellDragRef so the render loop can read it without
+    // any React re-renders during the drag.
+    if (down && down.cellMode && e.buttons === 1) {
+      const drag = cellDragRef.current;
+      if (!drag.active) {
+        const dx = e.clientX - down.startX;
+        const dy = e.clientY - down.startY;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+          drag.active = true;
+          if (canvasRef.current) canvasRef.current.style.cursor = 'grabbing';
+        }
+      }
+      if (drag.active) {
+        const canvas = canvasRef.current;
+        const vp = viewportRef.current;
+        if (canvas && vp) {
+          const pos = getMousePos(e, canvas);
+          const world = vp.screenToWorld(pos.x, pos.y);
+          drag.currentX = world.x;
+          drag.currentY = world.y;
+          drag.dropTarget = computeDropTarget(layoutRef.current, drag, world.x, world.y);
+        }
+        return;
+      }
+      // Not yet past threshold — fall through to normal hover updates
+    }
 
     // Bee drag mode
     if (down && down.beeMode && draggedBeeRef.current && e.buttons === 1) {
@@ -695,6 +1021,31 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     mouseDownRef.current = null;
     if (canvasRef.current) canvasRef.current.style.cursor = 'grab';
 
+    // End cell drag (if any). If there's a valid drop target, dispatch.
+    // If we never passed the threshold, fall through to treat as a click.
+    if (down && down.cellMode) {
+      const drag = cellDragRef.current;
+      if (drag.active) {
+        const dt = drag.dropTarget;
+        if (dt && dt.status === 'valid') {
+          const destPath = computeDestinationPath(drag, dt);
+          if (destPath) {
+            onCellDrop?.({
+              kind: drag.kind,
+              from: drag.path,
+              to: destPath,
+              dropTarget: dt,
+            });
+          }
+        }
+        // Reset drag state
+        cellDragRef.current = makeCellDragState();
+        return;
+      }
+      // No threshold crossed — reset and continue to click handling below
+      cellDragRef.current = makeCellDragState();
+    }
+
     // End bee drag (if any)
     if (draggedBeeRef.current) {
       const { agentId, startedDragging } = draggedBeeRef.current;
@@ -731,7 +1082,7 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       onCellDoubleClick?.(fp);
     } else {
       lastClickInfo.current = { path: fp, time: now };
-      onCellClick?.(fp);
+      onCellClick?.(fp, { ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
     }
   }, [onCellClick, onCellDoubleClick, onBeeClick]);
 
@@ -743,7 +1094,12 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onContextMenu={e => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (!onCellContextMenu) return;
+        const target = hitTestRich(e);
+        onCellContextMenu({ x: e.clientX, y: e.clientY, target });
+      }}
     />
   );
 }

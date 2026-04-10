@@ -6,6 +6,7 @@ use tauri::State;
 
 mod db;
 mod lsp;
+mod fs_watcher;
 
 /// Application state shared across commands
 pub struct AppState {
@@ -133,6 +134,173 @@ fn write_file(path: String, content: String, state: State<AppState>) -> Result<(
     }
 
     std::fs::write(&full_path, content).map_err(|e| e.to_string())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// File/folder CRUD — used by the hex grid drag-drop + context menus
+// ═══════════════════════════════════════════════════════════════════
+
+fn resolve_project_path(
+    path: &str,
+    state: &State<AppState>,
+) -> Result<PathBuf, String> {
+    let project = state.project_path.lock().unwrap();
+    let project_path = project.as_ref().ok_or("No project loaded")?;
+    let full = project_path.join(path);
+    if !full.starts_with(project_path) {
+        return Err("Path outside project".to_string());
+    }
+    Ok(full)
+}
+
+/// Create a new file with optional content. Fails if it already exists.
+#[tauri::command]
+fn create_file(
+    path: String,
+    content: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let full = resolve_project_path(&path, &state)?;
+    if full.exists() {
+        return Err("file already exists".to_string());
+    }
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&full, content.unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+/// Delete a file — moves to the OS trash (recoverable via the system
+/// recycle bin / .Trash / etc.). Falls back to permanent unlink if
+/// the trash crate can't reach a recycle bin (rare on Linux without
+/// gvfs, but handled gracefully).
+#[tauri::command]
+fn delete_file(path: String, state: State<AppState>) -> Result<(), String> {
+    let full = resolve_project_path(&path, &state)?;
+    match trash::delete(&full) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("[trash] delete_file fallback to permanent unlink: {}", e);
+            std::fs::remove_file(&full).map_err(|err| err.to_string())
+        }
+    }
+}
+
+/// Copy a file from an ABSOLUTE source path (outside the workspace)
+/// to a relative destination inside the workspace. Used by OS drag-in
+/// when the user drops a file from File Explorer onto the hex grid.
+#[tauri::command]
+fn copy_external_file(
+    from: String,
+    to: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let src = PathBuf::from(&from);
+    if !src.is_file() {
+        return Err(format!("Source is not a file: {}", from));
+    }
+    let dest = resolve_project_path(&to, &state)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Rename or move a file. Creates destination parent dirs if needed.
+#[tauri::command]
+fn rename_file(
+    old_path: String,
+    new_path: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let from = resolve_project_path(&old_path, &state)?;
+    let to = resolve_project_path(&new_path, &state)?;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())
+}
+
+/// Create a new (possibly nested) folder.
+#[tauri::command]
+fn create_folder(path: String, state: State<AppState>) -> Result<(), String> {
+    let full = resolve_project_path(&path, &state)?;
+    std::fs::create_dir_all(&full).map_err(|e| e.to_string())
+}
+
+/// Move/rename an entire folder and its contents.
+#[tauri::command]
+fn move_folder(
+    from: String,
+    to: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let from_full = resolve_project_path(&from, &state)?;
+    let to_full = resolve_project_path(&to, &state)?;
+    if let Some(parent) = to_full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&from_full, &to_full).map_err(|e| e.to_string())
+}
+
+/// Recursively delete a folder — moves to the OS trash when possible,
+/// falls back to permanent recursive removal otherwise.
+#[tauri::command]
+fn delete_folder(path: String, state: State<AppState>) -> Result<(), String> {
+    let full = resolve_project_path(&path, &state)?;
+    match trash::delete(&full) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("[trash] delete_folder fallback to permanent rm -rf: {}", e);
+            std::fs::remove_dir_all(&full).map_err(|err| err.to_string())
+        }
+    }
+}
+
+/// Open the OS file explorer at the given path (or its parent if it's
+/// a file). Cross-platform: Windows explorer, macOS Finder, Linux xdg-open.
+#[tauri::command]
+fn reveal_in_explorer(path: String, state: State<AppState>) -> Result<(), String> {
+    let full = resolve_project_path(&path, &state)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        // /select,<file> highlights the file inside the folder
+        let arg = if full.is_file() {
+            format!("/select,{}", full.to_string_lossy())
+        } else {
+            full.to_string_lossy().into_owned()
+        };
+        Command::new("explorer").arg(arg).spawn().map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        Command::new("open")
+            .arg("-R")
+            .arg(full.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let target = if full.is_file() {
+            full.parent().map(|p| p.to_path_buf()).unwrap_or(full.clone())
+        } else {
+            full.clone()
+        };
+        Command::new("xdg-open")
+            .arg(target.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 /// Single workspace search match — one matched line in one file
@@ -332,18 +500,30 @@ pub fn run() {
             project_path: Mutex::new(None),
         })
         .manage(lsp::LspState::default())
+        .manage(fs_watcher::WatcherState::default())
         .invoke_handler(tauri::generate_handler![
             scan_project,
             get_files,
             get_groups,
             read_file,
             write_file,
+            create_file,
+            delete_file,
+            rename_file,
+            copy_external_file,
+            create_folder,
+            move_folder,
+            delete_folder,
+            reveal_in_explorer,
             search_workspace,
             get_initial_workspace,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
             lsp::lsp_detect,
+            fs_watcher::start_fs_watcher,
+            fs_watcher::stop_fs_watcher,
+            fs_watcher::fs_watcher_root,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hexis");

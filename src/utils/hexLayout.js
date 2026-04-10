@@ -27,6 +27,18 @@ function ringForCount(n) {
   return 10;
 }
 
+/**
+ * Ring size for a GROUP. Guaranteed minimum ring-1 (= 7 cells) so every
+ * group always renders as a full hex, even if it contains 0 or 1 files.
+ * This is the key to the "always-hex" look: a group with 1 file shows
+ * 1 filled cell + 6 empty placeholder cells, and an empty group still
+ * shows 7 empty cells with its label.
+ */
+function ringForGroup(n) {
+  const r = ringForCount(n);
+  return r < 1 ? 1 : r;
+}
+
 /** Get all cells in a perfect hex ring of radius `ring` centered at (cq, cr). */
 function getHexRingCells(cq, cr, ring) {
   const cells = [];
@@ -87,29 +99,33 @@ export function computeLayout(files, groups, hexSize = HEX_SIZE) {
   // Meta-grid: folder centers placed on a hex grid with spacing based on ring size
   const folderPlacements = []; // [{ path, ring, cq, cr }]
 
-  // Calculate cells needed including sub-folder ring overhead + padding
+  // Calculate cells needed including sub-folder ring overhead + slack.
+  // Slack ensures every group has at least 2–3 empty cells for immediate
+  // drops without needing to regrow the ring on every drag-drop op.
   function cellsNeeded(gp) {
     const directFiles = (filesByGroup.get(gp) || []).length;
     const children = childGroupsOf.get(gp) || [];
     let total = directFiles;
     for (const child of children) {
       const childFiles = countAll(child.path);
-      if (childFiles === 0) continue;
-      // Sub-folder needs its complete ring
-      const childRing = ringForCount(childFiles);
+      // Sub-folder always needs its complete ring — even if 0 files,
+      // a child group still renders at min ring-1 (7 cells).
+      const childRing = ringForGroup(childFiles);
       total += hexCellCount(childRing);
     }
     // Minimal padding for packing slack
     if (children.length > 0) total = Math.ceil(total * 1.08);
+    // Breathing room for drag-drop: at least 1 extra cell, more for bigger groups
+    total += Math.max(1, Math.ceil(total * 0.15));
     return total;
   }
 
   for (const group of topGroups) {
-    const total = countAll(group.path);
-    if (total === 0) continue;
-    // Use cellsNeeded which accounts for sub-folder ring overhead
+    // Empty groups (zero files, zero child groups with files) still render
+    // as a ring-1 hex with a label — that's the "always-hex" requirement.
+    // Use cellsNeeded which accounts for sub-folder ring overhead + slack
     const neededCells = cellsNeeded(group.path);
-    const ring = ringForCount(neededCells);
+    const ring = ringForGroup(neededCells);
 
     // Find placement: first folder at origin, rest adjacent
     let cq, cr;
@@ -141,7 +157,40 @@ export function computeLayout(files, groups, hexSize = HEX_SIZE) {
     placeRootFilesAsCluster(rootFiles, gridUsed, cells, occupancy, hexSize);
   }
 
-  return { cells, folders, groupRegions, occupancy };
+  // ── Build cellOwner map — O(1) hit testing for files AND empty slots ──
+  // For every cell in a groupRegion, either it has a file (occupancy hit)
+  // → cellOwner entry with kind='file', or it's an empty slot → kind='empty'.
+  // Root files get cellOwner entries too so hit testing is uniform.
+  //
+  // For empty slots that lie inside MULTIPLE nested groups, the DEEPEST
+  // group wins (innermost wins) so drag-and-drop targets the tightest
+  // container. We sort regions by depth (deepest first) and let later
+  // writes overwrite earlier ones only when deeper.
+  const cellOwner = new Map();
+
+  // First pass: every file cell is a file entry
+  for (const [key, filePath] of occupancy) {
+    cellOwner.set(key, { kind: 'file', filePath });
+  }
+
+  // Second pass: fill empty slots with their deepest owning group.
+  // Iterate regions from shallowest to deepest so deeper wins via overwrite.
+  const sortedRegions = [...groupRegions.entries()].sort((a, b) => {
+    const da = folders.get(a[0])?.depth ?? 0;
+    const db = folders.get(b[0])?.depth ?? 0;
+    return da - db;
+  });
+  for (const [groupPath, regionCells] of sortedRegions) {
+    for (const c of regionCells) {
+      const key = `${c.q},${c.r}`;
+      const existing = cellOwner.get(key);
+      if (existing?.kind === 'file') continue; // file wins over empty
+      // Overwrite shallower empty with deeper empty
+      cellOwner.set(key, { kind: 'empty', groupPath, q: c.q, r: c.r });
+    }
+  }
+
+  return { cells, folders, groupRegions, occupancy, cellOwner };
 }
 
 /**
@@ -309,15 +358,36 @@ function placeFilesInHex(groupPath, name, cq, cr, ring, hexCells, depth,
     return count;
   }
 
+  // Estimate label rect so hit-testing can identify clicks on the
+  // group header. Size roughly matches GroupRenderer.drawGroupLabels
+  // (depth-aware font/plate sizes; width estimated from name length).
+  const rawName = name === '.' ? 'root' : (name || groupPath.split('/').pop() || groupPath);
+  const fontSize = depth === 0 ? 15 : depth === 1 ? 11 : 9;
+  const plateH = depth === 0 ? 26 : depth === 1 ? 20 : 14;
+  const estNameW = rawName.length * fontSize * 0.6;
+  const totalFilesCount = countAll(groupPath);
+  const countDigits = totalFilesCount > 0 ? String(totalFilesCount).length : 0;
+  const countW = depth < 2 && countDigits > 0 ? countDigits * fontSize * 0.55 + 8 : 0;
+  const totalW = estNameW + countW + 24;
+  const labelCX = topX;
+  const labelCY = topY - hexSize * 0.7;
+  const labelRect = {
+    x: labelCX - totalW / 2,
+    y: labelCY - plateH / 2,
+    w: totalW,
+    h: plateH,
+  };
+
   folders.set(groupPath, {
     x: center.x, y: center.y,
     radius: ring * hexSize * 1.8,
     labelX: topX, labelY: topY,
+    labelRect,
     name: name || groupPath.split('/').pop() || groupPath,
     depth, ring, cq, cr,
     fileCount: directFiles.length,
     childCount: childGroups.length,
-    totalFiles: countAll(groupPath),
+    totalFiles: totalFilesCount,
     path: groupPath,
     cellCount: hexCells.length,
   });
@@ -336,9 +406,9 @@ function placeFilesInHex(groupPath, name, cq, cr, ring, hexCells, depth,
 
   for (const child of sortedChildren) {
     const childTotal = countAll(child.path);
-    if (childTotal === 0) continue;
-
-    let childRing = ringForCount(childTotal);
+    // Don't skip empty children — an empty sub-group still renders at
+    // min ring-1 (7 cells) with its label, per the always-hex rule.
+    let childRing = ringForGroup(childTotal);
 
     // Find a sub-center within available cells (may reduce ring if needed)
     const subResult = findSubCenter(available, usedInGroup, childRing, cq, cr);

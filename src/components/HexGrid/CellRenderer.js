@@ -233,6 +233,80 @@ export function drawCell(ctx, file, x, y, sectionColor, zoomLevel, state = {}) {
   ctx.restore();
 }
 
+/**
+ * Draw an EMPTY cell — a placeholder hex that shows where new files can
+ * land (drop targets for drag-drop, click targets for "new file here").
+ *
+ * Visual: thin dashed hex outline at low alpha, with a subtle "+" glyph
+ * in the center for discoverability. When a drag is hovering this cell
+ * (`dropTarget: true`), it brightens + fills with the section color at
+ * ~20% alpha and pulses gently.
+ *
+ * Skipped in `satellite` zoom (at that distance the empty slots would
+ * just be visual noise).
+ */
+export function drawEmptyCell(ctx, x, y, sectionColor, zoomLevel, state = {}) {
+  if (zoomLevel === 'satellite') return;
+
+  const { dropTarget = false, hovered = false } = state;
+  const s = HEX_SIZE * 0.88;
+
+  ctx.save();
+
+  if (dropTarget) {
+    // ─── Drop target highlight — pulses amber + section color fill ───
+    const pulse = Math.sin(Date.now() * 0.006) * 0.15 + 0.85;
+    hexPath(ctx, x, y, s);
+    ctx.fillStyle = sectionColor + '33'; // ~20% alpha section tint
+    ctx.fill();
+    ctx.strokeStyle = `rgba(240, 160, 48, ${pulse})`;
+    ctx.lineWidth = 2.2;
+    ctx.setLineDash([]);
+    ctx.stroke();
+
+    // + glyph bigger + bright
+    ctx.fillStyle = `rgba(240, 160, 48, ${pulse})`;
+    ctx.font = `700 ${Math.round(HEX_SIZE * 0.5)}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('+', x, y + 1);
+  } else {
+    // ─── Passive placeholder — faint dashed outline + tiny + ───
+    // Region zoom: just a very faint outline, no +
+    if (zoomLevel === 'region') {
+      hexPath(ctx, x, y, s);
+      ctx.strokeStyle = 'rgba(139, 148, 158, 0.15)';
+      ctx.lineWidth = 0.8;
+      ctx.setLineDash([]);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    hexPath(ctx, x, y, s);
+    ctx.strokeStyle = hovered
+      ? 'rgba(240, 160, 48, 0.5)'
+      : 'rgba(139, 148, 158, 0.22)';
+    ctx.lineWidth = hovered ? 1.4 : 1;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Subtle + glyph in the center — only in city/street/interior
+    if (zoomLevel !== 'region') {
+      ctx.fillStyle = hovered
+        ? 'rgba(240, 160, 48, 0.55)'
+        : 'rgba(139, 148, 158, 0.28)';
+      ctx.font = `400 ${Math.round(HEX_SIZE * 0.4)}px Inter, system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('+', x, y + 1);
+    }
+  }
+
+  ctx.restore();
+}
+
 function getBorderState(gitStatus, testStatus) {
   if (gitStatus === 'conflict') return BORDER_STATES.conflict;
   if (testStatus === 'fail') return BORDER_STATES.testFail;

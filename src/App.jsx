@@ -22,6 +22,12 @@ import { usePanelStore } from './stores/panelStore.js';
 import TaskBoard from './components/TaskBoard/TaskBoard.jsx';
 import Onboarding from './components/Onboarding/Onboarding.jsx';
 import { MenuBar } from './components/MenuBar/MenuBar.jsx';
+import { ContextMenu } from './components/ContextMenu/ContextMenu.jsx';
+import { buildContextMenuItems } from './components/ContextMenu/hexContextMenu.js';
+import NameInputModal from './components/modals/NameInputModal.jsx';
+import { useClipboardStore } from './stores/clipboardStore.js';
+import { useFileOpsHistoryStore } from './stores/fileOpsHistoryStore.js';
+import { useSelectionStore } from './stores/selectionStore.js';
 import { W } from './theme/window-tokens.js';
 
 const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
@@ -75,6 +81,7 @@ export default function App() {
   const autoSave = usePrefsStore(s => s.autoSave);
   const setPref = usePrefsStore(s => s.setPref);
   const recentWorkspaces = useWorkspaceStore(s => s.recent);
+  const selectedCellSet = useSelectionStore(s => s.selected);
 
   const lastClickRef = useRef({ time: 0, path: null });
 
@@ -125,6 +132,56 @@ export default function App() {
     }
   }, [togglePanel]);
 
+  // ─── Live workspace refresh (debounced) ───────────────────────────
+  // Declared EARLY (before any callback or effect that uses it) so
+  // hoisted references in handleMenuAction, the fs_watcher effect,
+  // handleCellDrop, etc. don't hit a temporal-dead-zone error.
+  //
+  // Called after any file-system change (ours or external) to re-fetch
+  // files/groups and let the hex grid re-layout. Debounced 200ms so
+  // bursts coalesce into a single re-scan.
+  const refreshTimerRef = useRef(null);
+  const refreshWorkspace = useCallback(() => {
+    clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(async () => {
+      try {
+        if (IS_TAURI) {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const wsPath = useWorkspaceStore.getState().current;
+          if (wsPath) {
+            await invoke('scan_project', { path: wsPath });
+            setFiles(await invoke('get_files'));
+            setGroups(await invoke('get_groups'));
+          }
+        } else {
+          const res = await fetch('/api/graph');
+          const data = await res.json();
+          const mappedFiles = (data.nodes || []).map((n) => ({
+            path: n.id,
+            name: n.label || n.id.split('/').pop(),
+            extension: n.id.includes('.') ? n.id.split('.').pop() : '',
+            group_path: n.groupPath?.length > 0 ? n.groupPath[n.groupPath.length - 1] : (n.section || '.'),
+            size_bytes: 0,
+            is_landmark: n.label === 'index' || n.label === 'main' || n.label === 'App' || n.label === 'README' || n.label === 'mod' || n.type === 'index',
+            is_test: n.id.includes('.test.') || n.id.includes('.spec.') || n.id.includes('__tests__'),
+            is_config: ['json', 'yaml', 'yml', 'toml', 'env'].includes(n.id.split('.').pop()),
+            gitStatus: null,
+          }));
+          const mappedGroups = (data.clusters || []).map((c) => ({
+            path: c.id,
+            name: c.label || c.id.split('/').pop(),
+            parent_path: c.id.includes('/') ? c.id.slice(0, c.id.lastIndexOf('/')) : null,
+            depth: (c.id.match(/\//g) || []).length,
+          }));
+          setFiles(mappedFiles);
+          setGroups(mappedGroups);
+        }
+      } catch (err) {
+        console.warn('[refreshWorkspace]', err);
+      }
+    }, 200);
+  }, []);
+
   // ─── Menu bar action router ────────────────────────────────────────
   // Every menu item action ID lands here. Keep this list in sync with
   // the menuStructure memo below.
@@ -144,6 +201,45 @@ export default function App() {
       case 'file:openFolder': {
         const path = await ws.pickFolder();
         if (path) ws.setWorkspace(path);
+        break;
+      }
+      case 'file:newFile': {
+        // Default target: the group of the currently-selected file, else root
+        const targetGroup = (() => {
+          if (!selectedCell) return '.';
+          const f = files.find(x => x.path === selectedCell);
+          return f?.group_path || '.';
+        })();
+        setNameModal({
+          title: targetGroup !== '.' ? `New file in ${targetGroup}` : 'New file at workspace root',
+          initial: '',
+          placeholder: 'filename.ext',
+          onSubmit: async (name) => {
+            const filePath = targetGroup !== '.' ? `${targetGroup}/${name}` : name;
+            await ed.createFile(filePath);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'file:newFolder': {
+        const targetParent = (() => {
+          if (!selectedCell) return '.';
+          const f = files.find(x => x.path === selectedCell);
+          return f?.group_path || '.';
+        })();
+        setNameModal({
+          title: targetParent !== '.' ? `New folder in ${targetParent}` : 'New folder at workspace root',
+          initial: '',
+          placeholder: 'folder-name',
+          onSubmit: async (name) => {
+            const folderPath = targetParent !== '.' ? `${targetParent}/${name}` : name;
+            await ed.createFolder(folderPath);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
         break;
       }
       case 'file:save':
@@ -312,6 +408,9 @@ export default function App() {
     {
       label: 'File',
       items: [
+        { id: 'file:newFile', label: 'New File…', shortcut: 'Ctrl+N', mnemonic: 'N' },
+        { id: 'file:newFolder', label: 'New Folder…', shortcut: 'Ctrl+Shift+N', mnemonic: 'F' },
+        { separator: true },
         { id: 'file:openFolder', label: 'Open Folder…', shortcut: 'Ctrl+O', mnemonic: 'O' },
         {
           label: 'Open Recent',
@@ -511,7 +610,41 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // SSE listener for agent events
+  // Tauri fs_watcher — starts watching the current workspace; listens
+  // for hexis://fs_change events and triggers the debounced refresh.
+  useEffect(() => {
+    if (!IS_TAURI || !workspace) return;
+    let unlisten = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const { listen } = await import('@tauri-apps/api/event');
+        await invoke('start_fs_watcher', { path: workspace });
+        if (cancelled) return;
+        unlisten = await listen('hexis://fs_change', () => {
+          refreshWorkspace();
+        });
+      } catch (err) {
+        console.warn('[fs_watcher]', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) { try { unlisten(); } catch {} }
+      (async () => {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('stop_fs_watcher');
+        } catch {}
+      })();
+    };
+  }, [workspace, refreshWorkspace]);
+
+  // SSE listener for agent events + live file-system changes.
+  // When the server's chokidar watcher fires, we receive a batch and
+  // debounce-refresh the workspace so the hex grid reflects external
+  // edits, git operations, build artifacts, etc.
   useEffect(() => {
     if (IS_TAURI) return; // Tauri uses its own event system
     const es = new EventSource('/events');
@@ -524,19 +657,42 @@ export default function App() {
             data.type === 'tokens_update') {
           onAgentEvent(data);
         }
+        // File-system changes → debounced workspace refresh
+        if (data.type === 'fileChange' || data.type === 'fs_change' || data.type === 'batch') {
+          refreshWorkspace();
+        }
       } catch { /* ignore parse errors */ }
     };
     return () => es.close();
-  }, []);
+  }, [refreshWorkspace]);
 
-  // Enrich files with git status for the hex grid (memoized to prevent layout recalc on unrelated re-renders)
-  const enrichedFiles = useMemo(() => files.map(f => ({
-    ...f,
-    gitStatus: getFileStatus(f.path),
-  })), [files, modified, staged, untracked]);
+  // Enrich files with git status. Critically, we use `files` as the
+  // ONLY source of identity — when git status changes, we mutate the
+  // existing array's elements in place rather than creating a new
+  // array reference. This keeps `computeLayout()` from running on
+  // every git fetch: HexCanvas's layout effect has `[files, groups]`
+  // in its deps, so it only re-runs when the array IDENTITY changes.
+  // Since we return the same array reference (just mutated per-item),
+  // the layout stays stable while cells still pick up the new
+  // gitStatus via the ref during the render pass.
+  const enrichedFiles = useMemo(() => {
+    for (const f of files) f.gitStatus = getFileStatus(f.path);
+    return files;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, modified, staged, untracked]);
 
-  // Single click = select + open file + auto-expand editor if collapsed
-  const handleCellClick = useCallback((filePath) => {
+  // Single click = select + open file + auto-expand editor if collapsed.
+  // Ctrl/Cmd+click toggles the file in the multi-selection set.
+  // Shift+click is reserved for range-select (v2).
+  const handleCellClick = useCallback((filePath, mods = {}) => {
+    const sel = useSelectionStore.getState();
+    if (mods.ctrlKey || mods.metaKey) {
+      // Multi-select toggle — don't open file, don't change primary
+      if (filePath) sel.toggle(filePath);
+      return;
+    }
+    // Plain click replaces selection with just this file
+    sel.replace(filePath);
     setSelectedCell(filePath || null);
     if (filePath) {
       openFile(filePath);
@@ -553,6 +709,424 @@ export default function App() {
       setSelectedCell(filePath);
     }
   }, []);
+
+  // ─── Hex grid context menu state ─────────────────────────────────
+  // ctxMenu shape when open: { x, y, items }
+  const [ctxMenu, setCtxMenu] = useState(null);
+  // nameModal shape when open: { title, placeholder, initial, onSubmit }
+  const [nameModal, setNameModal] = useState(null);
+
+  const handleCellContextMenu = useCallback(({ x, y, target }) => {
+    const items = buildContextMenuItems(target, {
+      workspace,
+      tabs: useEditorStore.getState().tabs,
+      hasClipboard: useClipboardStore.getState().hasContent(),
+    });
+    setCtxMenu({ x, y, items });
+  }, [workspace]);
+
+  // Drag-and-drop: called when the hex grid releases a drag on a valid
+  // drop target. We optimistically patch the local files/groups state
+  // so the layout reflows instantly, then confirm with the backend.
+  // On error we rollback by calling refreshWorkspace(). Every successful
+  // move is pushed onto the undo stack.
+  const handleCellDrop = useCallback(async ({ kind, from, to }) => {
+    const ed = useEditorStore.getState();
+    const history = useFileOpsHistoryStore.getState();
+
+    if (kind === 'file') {
+      // If there's a multi-selection and the dragged file is in it, move
+      // the ENTIRE selection as a batch to the target group.
+      const sel = useSelectionStore.getState();
+      const selected = sel.toArray();
+      const isMulti = selected.length > 1 && sel.has(from);
+
+      if (isMulti) {
+        const targetGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '.';
+        const batchOps = [];
+        // Optimistic patch for all selected files
+        setFiles(prev => prev.map(f => {
+          if (!sel.has(f.path)) return f;
+          const leaf = f.path.split('/').pop();
+          const newPath = targetGroup !== '.' ? `${targetGroup}/${leaf}` : leaf;
+          return { ...f, path: newPath, group_path: targetGroup };
+        }));
+        // Confirm each move on the backend (serial to avoid conflicts)
+        let failed = 0;
+        for (const srcPath of selected) {
+          const leaf = srcPath.split('/').pop();
+          const destPath = targetGroup !== '.' ? `${targetGroup}/${leaf}` : leaf;
+          if (srcPath === destPath) continue;
+          const r = await ed.renameFile(srcPath, destPath);
+          if (r?.ok !== false) {
+            batchOps.push({ kind: 'move', fromPath: srcPath, toPath: destPath, entity: 'file' });
+          } else {
+            failed++;
+          }
+        }
+        if (failed > 0) {
+          console.warn(`Batch drop: ${failed} moves failed, refreshing`);
+          refreshWorkspace();
+        } else if (batchOps.length > 0) {
+          history.push({ kind: 'batch', ops: batchOps });
+        }
+        sel.clear();
+        return;
+      }
+
+      // Single-cell move
+      const newGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '.';
+      setFiles(prev => prev.map(f =>
+        f.path === from ? { ...f, path: to, group_path: newGroup } : f,
+      ));
+      const result = await ed.renameFile(from, to);
+      if (result?.ok === false) {
+        console.warn('Drop failed, refreshing:', result.error);
+        refreshWorkspace();
+      } else {
+        history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'file' });
+      }
+    } else if (kind === 'group') {
+      // Optimistic patch: update the group's own path + every file/child whose
+      // path starts with the old group path.
+      const fromPrefix = from.endsWith('/') ? from : from + '/';
+      setGroups(prev => prev.map(g => {
+        if (g.path === from) return { ...g, path: to, parent_path: to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : null };
+        if (g.path.startsWith(fromPrefix)) return { ...g, path: to + g.path.slice(from.length) };
+        return g;
+      }));
+      setFiles(prev => prev.map(f => {
+        if (f.path === from || f.path.startsWith(fromPrefix)) {
+          const newPath = to + f.path.slice(from.length);
+          const newGroup = newPath.includes('/') ? newPath.slice(0, newPath.lastIndexOf('/')) : '.';
+          return { ...f, path: newPath, group_path: newGroup };
+        }
+        return f;
+      }));
+      const result = await ed.moveFolder(from, to);
+      if (result?.ok === false) {
+        console.warn('Group drop failed, refreshing:', result.error);
+        refreshWorkspace();
+      } else {
+        history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'folder' });
+      }
+    }
+  }, [refreshWorkspace]);
+
+  // OS drag-in: files dropped from File Explorer / Finder onto the hex
+  // grid. Copies each source file into the target group using the Tauri
+  // `copy_external_file` command (desktop) or FileReader + POST (web).
+  const handleOSDrop = useCallback(async ({ kind, paths, files: droppedFiles, targetGroup }) => {
+    const ed = useEditorStore.getState();
+    const dest = targetGroup && targetGroup !== '.' ? targetGroup : '';
+    const results = [];
+
+    if (kind === 'tauri' && paths) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        for (const srcPath of paths) {
+          const leaf = srcPath.replace(/\\/g, '/').split('/').pop();
+          const destPath = dest ? `${dest}/${leaf}` : leaf;
+          try {
+            await invoke('copy_external_file', { from: srcPath, to: destPath });
+            results.push({ ok: true, path: destPath });
+          } catch (err) {
+            results.push({ ok: false, path: destPath, error: String(err) });
+          }
+        }
+      } catch (err) {
+        console.error('[os-drop]', err);
+      }
+    } else if (kind === 'web' && droppedFiles) {
+      for (const file of droppedFiles) {
+        const leaf = file.name;
+        const destPath = dest ? `${dest}/${leaf}` : leaf;
+        try {
+          const text = await file.text();
+          const r = await ed.createFile(destPath); // creates empty
+          // createFile is "create empty + open". Overwrite with actual content.
+          const saveRes = await fetch('/api/file', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: destPath, content: text }),
+          });
+          if (!saveRes.ok) throw new Error(`HTTP ${saveRes.status}`);
+          results.push({ ok: true, path: destPath });
+        } catch (err) {
+          results.push({ ok: false, path: destPath, error: String(err) });
+        }
+      }
+    }
+
+    const failed = results.filter(r => !r.ok);
+    if (failed.length) {
+      console.warn('OS drop failures:', failed);
+      alert(`${failed.length} file(s) could not be imported. See console.`);
+    }
+    refreshWorkspace();
+  }, [refreshWorkspace]);
+
+  // Build the deps object for fileOpsHistoryStore.undo/redo. Extracted
+  // so both keyboard and menu actions can use it.
+  const historyDeps = useMemo(() => ({
+    renameFile: (from, to) => useEditorStore.getState().renameFile(from, to),
+    createFile: async (path, content) => {
+      try {
+        if (IS_TAURI) {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('create_file', { path, content });
+        } else {
+          const res = await fetch('/api/file/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, content }),
+          });
+          if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
+        }
+        return { ok: true };
+      } catch (err) { return { ok: false, error: err.message || String(err) }; }
+    },
+    deleteFile: (path) => useEditorStore.getState().deleteFile(path),
+    createFolder: (path) => useEditorStore.getState().createFolder(path),
+    moveFolder: (from, to) => useEditorStore.getState().moveFolder(from, to),
+    deleteFolder: (path) => useEditorStore.getState().deleteFolder(path),
+  }), []);
+
+  // ─── Context menu action router ──────────────────────────────────
+  const handleHexContextAction = useCallback(async (actionId) => {
+    const ed = useEditorStore.getState();
+
+    // Parse `hex:<verb>:<args>` — some verbs have multiple colon-separated args
+    if (!actionId.startsWith('hex:')) return;
+    const body = actionId.slice(4);
+    const colonIdx = body.indexOf(':');
+    const verb = colonIdx === -1 ? body : body.slice(0, colonIdx);
+    const arg = colonIdx === -1 ? '' : body.slice(colonIdx + 1);
+
+    switch (verb) {
+      case 'open': {
+        ed.openFile(arg);
+        break;
+      }
+      case 'openToSide': {
+        ed.openFile(arg);
+        break;
+      }
+      case 'rename': {
+        const filePath = arg;
+        const oldName = filePath.split('/').pop();
+        const parent = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : '';
+        setNameModal({
+          title: `Rename ${oldName}`,
+          initial: oldName,
+          placeholder: 'new name',
+          onSubmit: async (newName) => {
+            const newPath = parent ? `${parent}/${newName}` : newName;
+            const result = await ed.renameFile(filePath, newPath);
+            setNameModal(null);
+            if (result?.ok === false) {
+              alert(`Rename failed: ${result.error}`);
+            } else {
+              refreshWorkspace();
+            }
+          },
+        });
+        break;
+      }
+      case 'delete': {
+        const filePath = arg;
+        if (!confirm(`Delete ${filePath}?`)) return;
+        await ed.deleteFile(filePath);
+        refreshWorkspace();
+        break;
+      }
+      case 'newFile': {
+        const groupPath = arg; // may be '.'
+        setNameModal({
+          title: groupPath && groupPath !== '.' ? `New file in ${groupPath}` : 'New file at workspace root',
+          initial: '',
+          placeholder: 'filename.ext',
+          onSubmit: async (name) => {
+            const filePath = groupPath && groupPath !== '.' ? `${groupPath}/${name}` : name;
+            await ed.createFile(filePath);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'newFolder': {
+        const parentGroup = arg;
+        setNameModal({
+          title: parentGroup && parentGroup !== '.' ? `New folder in ${parentGroup}` : 'New folder at workspace root',
+          initial: '',
+          placeholder: 'folder-name',
+          onSubmit: async (name) => {
+            const folderPath = parentGroup && parentGroup !== '.' ? `${parentGroup}/${name}` : name;
+            await ed.createFolder(folderPath);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'newFileRoot': {
+        setNameModal({
+          title: 'New file at workspace root',
+          initial: '',
+          placeholder: 'filename.ext',
+          onSubmit: async (name) => {
+            await ed.createFile(name);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'newFolderRoot': {
+        setNameModal({
+          title: 'New folder at workspace root',
+          initial: '',
+          placeholder: 'folder-name',
+          onSubmit: async (name) => {
+            await ed.createFolder(name);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'renameGroup': {
+        const groupPath = arg;
+        const oldName = groupPath.split('/').pop();
+        const parent = groupPath.includes('/') ? groupPath.slice(0, groupPath.lastIndexOf('/')) : '';
+        setNameModal({
+          title: `Rename folder ${oldName}`,
+          initial: oldName,
+          placeholder: 'new name',
+          onSubmit: async (newName) => {
+            const newPath = parent ? `${parent}/${newName}` : newName;
+            await ed.moveFolder(groupPath, newPath);
+            setNameModal(null);
+            refreshWorkspace();
+          },
+        });
+        break;
+      }
+      case 'deleteGroup': {
+        const groupPath = arg;
+        if (!confirm(`Delete folder "${groupPath}" and ALL its contents?`)) return;
+        await ed.deleteFolder(groupPath);
+        refreshWorkspace();
+        break;
+      }
+      case 'moveTo': {
+        // arg = `<kind>:<path>:<destParent>`
+        const parts = arg.split(':');
+        const kind = parts[0];
+        const path = parts[1];
+        const destParent = parts.slice(2).join(':');
+        const leafName = path.split('/').pop();
+        const newPath = destParent && destParent !== '.' ? `${destParent}/${leafName}` : leafName;
+        const result = kind === 'file'
+          ? await ed.renameFile(path, newPath)
+          : await ed.moveFolder(path, newPath);
+        if (result?.ok !== false) {
+          useFileOpsHistoryStore.getState().push({
+            kind: 'move',
+            fromPath: path,
+            toPath: newPath,
+            entity: kind === 'file' ? 'file' : 'folder',
+          });
+        }
+        refreshWorkspace();
+        break;
+      }
+      case 'copyPath': {
+        const full = workspace ? `${workspace}/${arg}` : arg;
+        try { await navigator.clipboard.writeText(full); } catch {}
+        break;
+      }
+      case 'copyRelativePath': {
+        try { await navigator.clipboard.writeText(arg); } catch {}
+        break;
+      }
+      case 'cut': {
+        useClipboardStore.getState().cut([{ kind: 'file', path: arg }]);
+        break;
+      }
+      case 'copy': {
+        useClipboardStore.getState().copy([{ kind: 'file', path: arg }]);
+        break;
+      }
+      case 'paste': {
+        const targetGroup = arg && arg !== '.' ? arg : '.';
+        const results = await useClipboardStore.getState().paste(targetGroup, {
+          getAllFiles: () => files,
+          renameFile: (from, to) => ed.renameFile(from, to),
+          createFile: async (path, content) => {
+            try {
+              if (IS_TAURI) {
+                const { invoke } = await import('@tauri-apps/api/core');
+                await invoke('create_file', { path, content });
+              } else {
+                const res = await fetch('/api/file/create', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ path, content }),
+                });
+                if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
+              }
+              return { ok: true };
+            } catch (err) { return { ok: false, error: err.message || String(err) }; }
+          },
+          readFile: async (path) => {
+            try {
+              if (IS_TAURI) {
+                const { invoke } = await import('@tauri-apps/api/core');
+                return await invoke('read_file', { path });
+              }
+              const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
+              const d = await r.json();
+              return d.content;
+            } catch { return null; }
+          },
+          moveFolder: (from, to) => ed.moveFolder(from, to),
+          createFolder: (path) => ed.createFolder(path),
+        });
+        const fails = results.filter(r => !r.ok && !r.skipped);
+        if (fails.length) {
+          console.warn('Paste had errors:', fails);
+          alert(`Paste: ${fails.length} operation(s) failed. See console.`);
+        }
+        refreshWorkspace();
+        break;
+      }
+      case 'pasteRoot': {
+        // Fire a fresh invocation routed to 'paste' at root
+        setTimeout(() => handleHexContextAction('hex:paste:.'), 0);
+        break;
+      }
+      case 'revealInExplorer': {
+        const p = arg === '.' ? '' : arg;
+        if (IS_TAURI) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('reveal_in_explorer', { path: p });
+          } catch (err) {
+            console.error(err);
+          }
+        }
+        break;
+      }
+      case 'refresh': {
+        refreshWorkspace();
+        break;
+      }
+      default:
+        console.warn('[hex context] unknown verb', verb, arg);
+    }
+  }, [refreshWorkspace, workspace, files, selectedCell]);
 
   // Keyboard
   useEffect(() => {
@@ -602,10 +1176,78 @@ export default function App() {
         e.preventDefault();
         usePanelStore.getState().showPanel('search');
       }
+      // Ctrl+N: new file (don't intercept when editor has focus — CM6 uses Ctrl+N for something else)
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'n' || e.key === 'N')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        if (!editorFocused) {
+          e.preventDefault();
+          handleMenuAction('file:newFile');
+        }
+      }
+      // Ctrl+Z / Ctrl+Y: file-ops history (undo/redo) — ONLY when the
+      // editor isn't focused (CodeMirror owns undo for text editing).
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          useFileOpsHistoryStore.getState().undo(historyDeps).then((ok) => {
+            if (ok) refreshWorkspace();
+          });
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          useFileOpsHistoryStore.getState().redo(historyDeps).then((ok) => {
+            if (ok) refreshWorkspace();
+          });
+        }
+      }
+      // Ctrl+X/C/V: workspace clipboard — ONLY when no text editor or text
+      // input has focus. The active selected cell (from the grid) is the
+      // target; if nothing is selected these are no-ops.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'x' || e.key === 'X')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused && selectedCell) {
+          e.preventDefault();
+          useClipboardStore.getState().cut([{ kind: 'file', path: selectedCell }]);
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused && selectedCell && window.getSelection?.().toString() === '') {
+          e.preventDefault();
+          useClipboardStore.getState().copy([{ kind: 'file', path: selectedCell }]);
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused && useClipboardStore.getState().hasContent()) {
+          e.preventDefault();
+          // Paste into the group of the selected cell, or root
+          const targetGroup = (() => {
+            if (!selectedCell) return '.';
+            const f = files.find(x => x.path === selectedCell);
+            return f?.group_path || '.';
+          })();
+          handleHexContextAction(`hex:paste:${targetGroup}`);
+        }
+      }
+      // Ctrl+Shift+N: new folder
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'N' || e.key === 'n')) {
+        e.preventDefault();
+        handleMenuAction('file:newFolder');
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [activeTab, togglePanel]);
+  }, [activeTab, togglePanel, handleMenuAction, handleHexContextAction, selectedCell, files, historyDeps, refreshWorkspace]);
 
   const changedCount = modified.length + staged.length + untracked.length;
 
@@ -685,6 +1327,10 @@ export default function App() {
             pendingPlan={pendingPlan}
             onCellClick={handleCellClick}
             onCellDoubleClick={handleCellDoubleClick}
+            onCellContextMenu={handleCellContextMenu}
+            onCellDrop={handleCellDrop}
+            onOSDrop={handleOSDrop}
+            selectedCells={selectedCellSet}
             onBeeClick={(agentId) => setSelectedBeeId(agentId)}
             onCellHover={(fp) => {
               if (!fp) { setHoveredFileInfo(null); return; }
@@ -777,6 +1423,29 @@ export default function App() {
         agents={activeAgents}
         onClose={() => setSelectedBeeId(null)}
       />
+
+      {/* Hex grid right-click context menu */}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={ctxMenu.items}
+          onAction={handleHexContextAction}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+
+      {/* Name input modal — used by New File / New Folder / Rename flows */}
+      {nameModal && (
+        <NameInputModal
+          open
+          title={nameModal.title}
+          placeholder={nameModal.placeholder}
+          initial={nameModal.initial}
+          onSubmit={nameModal.onSubmit}
+          onClose={() => setNameModal(null)}
+        />
+      )}
 
       {/* Status bar */}
       <div

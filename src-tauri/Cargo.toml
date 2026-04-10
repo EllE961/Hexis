@@ -22,3 +22,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 dirs = "6"
 which = "7"
+notify = "6"
+notify-debouncer-full = "0.3"
+trash = "5.2.5"

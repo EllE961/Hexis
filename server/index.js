@@ -95,6 +95,128 @@ app.put('/api/file', async (req, res) => {
   }
 });
 
+// ─── File/Folder CRUD — create/delete/move ───
+//
+// These sit alongside PUT /api/file (save existing content) and power
+// the hex grid's drag-drop + right-click file operations.
+
+// POST /api/file/create  { path, content? }
+// Create a new file (empty by default). Fails if the file already exists.
+app.post('/api/file/create', async (req, res) => {
+  const { path: filePath, content = '' } = req.body || {};
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  if (!isPathSafe(filePath)) return res.status(403).json({ error: 'path outside repo' });
+  try {
+    const { mkdir, access, writeFile: fsWriteFile } = await import('fs/promises');
+    const fullPath = resolve(REPO_PATH, filePath);
+    // Refuse to clobber an existing file
+    try {
+      await access(fullPath);
+      return res.status(409).json({ error: 'file already exists' });
+    } catch { /* file doesn't exist — good */ }
+    const parent = resolve(fullPath, '..');
+    await mkdir(parent, { recursive: true });
+    await fsWriteFile(fullPath, content, 'utf-8');
+    res.json({ ok: true, path: filePath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/file?path=...
+// Moves to the OS trash via the `trash` package (recoverable in recycle
+// bin). Falls back to permanent unlink if trash fails.
+app.delete('/api/file', async (req, res) => {
+  const { path: filePath } = req.query;
+  if (!filePath) return res.status(400).json({ error: 'path required' });
+  if (!isPathSafe(filePath)) return res.status(403).json({ error: 'path outside repo' });
+  try {
+    const fullPath = resolve(REPO_PATH, filePath);
+    try {
+      const trashModule = await import('trash');
+      const trash = trashModule.default;
+      await trash(fullPath);
+    } catch (trashErr) {
+      console.warn('[trash] fallback to unlink:', trashErr.message);
+      const { unlink } = await import('fs/promises');
+      await unlink(fullPath);
+    }
+    res.json({ ok: true, path: filePath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/folder/create  { path }
+app.post('/api/folder/create', async (req, res) => {
+  const { path: folderPath } = req.body || {};
+  if (!folderPath) return res.status(400).json({ error: 'path required' });
+  if (!isPathSafe(folderPath)) return res.status(403).json({ error: 'path outside repo' });
+  try {
+    const { mkdir, stat } = await import('fs/promises');
+    const fullPath = resolve(REPO_PATH, folderPath);
+    // Pre-check: if a FILE already exists at that path, mkdir would throw
+    // a cryptic EEXIST. Return a clear error instead.
+    try {
+      const st = await stat(fullPath);
+      if (st.isFile()) {
+        return res.status(409).json({
+          error: `A file named "${folderPath}" already exists at that location. Rename or delete it first.`,
+        });
+      }
+      if (st.isDirectory()) {
+        return res.status(409).json({ error: `Folder "${folderPath}" already exists.` });
+      }
+    } catch { /* doesn't exist — good, proceed */ }
+    await mkdir(fullPath, { recursive: true });
+    res.json({ ok: true, path: folderPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/folder/move  { from, to }
+// Renames an entire directory (and everything inside it).
+app.post('/api/folder/move', async (req, res) => {
+  const { from, to } = req.body || {};
+  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+  if (!isPathSafe(from) || !isPathSafe(to)) return res.status(403).json({ error: 'path outside repo' });
+  try {
+    const { mkdir, rename } = await import('fs/promises');
+    const fromFull = resolve(REPO_PATH, from);
+    const toFull = resolve(REPO_PATH, to);
+    const parent = resolve(toFull, '..');
+    await mkdir(parent, { recursive: true });
+    await rename(fromFull, toFull);
+    res.json({ ok: true, from, to });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/folder?path=...&recursive=true
+// Moves to trash when possible, falls back to permanent rm -rf.
+app.delete('/api/folder', async (req, res) => {
+  const { path: folderPath, recursive } = req.query;
+  if (!folderPath) return res.status(400).json({ error: 'path required' });
+  if (!isPathSafe(folderPath)) return res.status(403).json({ error: 'path outside repo' });
+  try {
+    const fullPath = resolve(REPO_PATH, folderPath);
+    try {
+      const trashModule = await import('trash');
+      const trash = trashModule.default;
+      await trash(fullPath);
+    } catch (trashErr) {
+      console.warn('[trash] fallback to rm:', trashErr.message);
+      const { rm } = await import('fs/promises');
+      await rm(fullPath, { recursive: recursive === 'true', force: false });
+    }
+    res.json({ ok: true, path: folderPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Workspace Search (ripgrep) ───
 //
 // POST /api/search { pattern, regex?, caseSensitive?, glob?, max? }

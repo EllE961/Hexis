@@ -13,13 +13,19 @@ import { hexPath } from '../../utils/hexMath.js';
 
 const HEX_SIZE = 30;
 
+// Git-status borders — conflict and test-fail are "alarm" states and stay
+// bold. Modified/staged are informational — they must be CLEAR but must NOT
+// cover hover/selection/group-highlight effects that layer on top. Solution:
+// thin (1.2px same as the default gray border) + 55% alpha so the base cell
+// gradient and any overlay wash still read through cleanly. The corner dot
+// badge (drawn later) is the primary "this is modified" signal.
 const BORDER_STATES = {
-  conflict:  { color: '#EF4444', width: 2.5 },
-  modified:  { color: '#F59E0B', width: 2 },
-  staged:    { color: '#22C55E', width: 2 },
-  clean:     { color: null, width: 0 },
-  untracked: { color: null, width: 0 },
-  testFail:  { color: '#DC2626', width: 2 },
+  conflict:  { color: '#EF4444',  width: 2.5 },  // alarm — stays bold
+  modified:  { color: '#F59E0B8C', width: 1.2 },  // subtle, 55% alpha amber
+  staged:    { color: '#22C55E8C', width: 1.2 },  // subtle, 55% alpha green
+  clean:     { color: null,       width: 0 },
+  untracked: { color: null,       width: 0 },
+  testFail:  { color: '#DC2626',  width: 2 },    // alarm — stays bold
 };
 
 function hexToRgb(hex) {
@@ -188,16 +194,27 @@ export function drawCell(ctx, file, x, y, sectionColor, zoomLevel, state = {}) {
   }
 
   // === 5. GIT STATUS: tiny colored corner badge ===
+  // A small (2.2px) dot at the top-right corner. This is the PRIMARY
+  // "this cell is modified" signal — the border is deliberately subtle so
+  // hover/selection/group-highlight effects show through cleanly. The badge
+  // stays crisp + bright because it occupies ~8 pixels and doesn't compete
+  // with the ring/fill effects that layer around the cell perimeter.
   if (gitStatus === 'modified' || gitStatus === 'staged') {
     const badgeColor = gitStatus === 'modified' ? '#F59E0B' : '#22C55E';
     const bx = x + s * 0.52;
     const by = y - s * 0.52;
+    // Outer soft halo (warm glow) — reads as a subtle hint at distance
     ctx.beginPath();
-    ctx.arc(bx, by, 3, 0, Math.PI * 2);
+    ctx.arc(bx, by, 4.2, 0, Math.PI * 2);
+    ctx.fillStyle = badgeColor + '30';  // 19% alpha halo
+    ctx.fill();
+    // Crisp core dot
+    ctx.beginPath();
+    ctx.arc(bx, by, 2.2, 0, Math.PI * 2);
     ctx.fillStyle = badgeColor;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.lineWidth = 0.5;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.lineWidth = 0.4;
     ctx.stroke();
   }
 

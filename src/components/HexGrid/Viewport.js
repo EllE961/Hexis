@@ -33,46 +33,104 @@ export class Viewport {
     this.height = h;
   }
 
-  /** Animate each frame: spring for position, velocity decay for zoom. */
+  /**
+   * Animate each frame.
+   *
+   * There are two distinct animation modes and they MUST NOT overlap:
+   *
+   * 1. **Timed camera move** (set by `centerOn` / `centerOnWithOvershoot` /
+   *    `fitBoundsAnimated`): x, y, and zoom interpolate from the captured
+   *    start values to their targets over `_animDuration` ms using a single
+   *    cubic ease-out curve. This guarantees all three axes reach their
+   *    destinations at the SAME moment — no "zoom teleports then pan drifts"
+   *    feeling, because the visual change is driven by one clock, not three
+   *    independent per-axis eases.
+   *
+   * 2. **Wheel zoom** (set by `zoomAt`): velocity-decay toward cursor. Used
+   *    for continuous scroll input where there's no discrete "target". This
+   *    also cancels any running timed animation since the user is taking
+   *    control of the camera.
+   */
   update() {
-    // ── Smooth zoom via velocity decay ──
+    // ── Wheel zoom velocity decay ──
     const zv = this._zoomVelocity || 0;
     if (Math.abs(zv) > 0.0001) {
-      const focus = this._zoomFocusScreen || { x: this.width / 2, y: this.height / 2 };
+      // User is wheel-zooming — cancel any running timed animation
+      this._animStart = null;
 
-      // World point under cursor BEFORE zoom step
+      const focus = this._zoomFocusScreen || { x: this.width / 2, y: this.height / 2 };
       const wx = (focus.x - this.width / 2) / this.zoom + this.x;
       const wy = (focus.y - this.height / 2) / this.zoom + this.y;
 
-      // Apply zoom velocity
       this.zoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom * (1 + zv)));
       this.tz = this.zoom;
 
-      // Keep world point under cursor
       this.x = wx - (focus.x - this.width / 2) / this.zoom;
       this.y = wy - (focus.y - this.height / 2) / this.zoom;
       this.tx = this.x;
       this.ty = this.y;
 
-      // Decay velocity (smooth deceleration)
       this._zoomVelocity = zv * 0.85;
       if (Math.abs(this._zoomVelocity) < 0.0001) this._zoomVelocity = 0;
+      return;
     }
 
-    // ── Smooth ease-out for position + zoom (centerOn animation) ──
-    const ease = 0.15; // exponential ease-out — no bounce, clean glide
+    // ── Timed camera move (synchronized x/y/zoom interpolation) ──
+    if (this._animStart != null) {
+      const now = performance.now();
+      const rawT = (now - this._animStart) / this._animDuration;
+      const t = rawT >= 1 ? 1 : rawT;
+      // Cubic ease-out — fast start, smooth settle, no bounce
+      const eased = 1 - Math.pow(1 - t, 3);
 
-    this.x += (this.tx - this.x) * ease;
-    this.y += (this.ty - this.y) * ease;
-    this.zoom += (this.tz - this.zoom) * ease;
+      this.x    = this._animFromX + (this.tx - this._animFromX) * eased;
+      this.y    = this._animFromY + (this.ty - this._animFromY) * eased;
+      this.zoom = this._animFromZ + (this.tz - this._animFromZ) * eased;
+      this.zoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom));
 
-    // Clamp zoom
-    this.zoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom));
+      if (t >= 1) {
+        // Overshoot: we just finished the "out" phase — start the elastic
+        // settle-back phase (target now the real final zoom, retrigger
+        // a second short animation from current zoom).
+        if (this._overshootPhase === 'out' && this._overshootSettleZoom != null) {
+          this._animStart = now;
+          this._animDuration = 180;  // quick settle
+          this._animFromX = this.x;
+          this._animFromY = this.y;
+          this._animFromZ = this.zoom;
+          this.tz = this._overshootSettleZoom;
+          this._overshootPhase = 'settle';
+          return;
+        }
+        // Normal end — snap exactly to target
+        this.x = this.tx;
+        this.y = this.ty;
+        this.zoom = this.tz;
+        this._animStart = null;
+        this._overshootPhase = null;
+        this._overshootSettleZoom = null;
+      }
+      return;
+    }
 
-    // Snap when close
-    if (Math.abs(this.tx - this.x) < this.precision) this.x = this.tx;
-    if (Math.abs(this.ty - this.y) < this.precision) this.y = this.ty;
-    if (Math.abs(this.tz - this.zoom) < this.precision) this.zoom = this.tz;
+    // ── Idle: if targets drift from current (e.g. via direct .tx/.tz assign
+    //    outside the animation API), fall back to a gentle per-axis ease so
+    //    the camera still converges without jitter. This is the safety net.
+    const ease = 0.15;
+    const dx = this.tx - this.x;
+    const dy = this.ty - this.y;
+    const dz = this.tz - this.zoom;
+    if (Math.abs(dx) > this.precision || Math.abs(dy) > this.precision ||
+        Math.abs(dz) > this.precision) {
+      this.x += dx * ease;
+      this.y += dy * ease;
+      this.zoom += dz * ease;
+      this.zoom = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom));
+    } else {
+      this.x = this.tx;
+      this.y = this.ty;
+      this.zoom = this.tz;
+    }
   }
 
   /** Apply camera transform to canvas context. */
@@ -118,15 +176,70 @@ export class Viewport {
     this.ty -= dy;
   }
 
-  /** Smoothly center on a world position. Optional zoom. */
-  centerOn(wx, wy, zoom) {
-    this.tx = wx;
-    this.ty = wy;
-    if (zoom != null) this.tz = Math.max(this.minZoom, Math.min(this.maxZoom, zoom));
+  /**
+   * Compute a natural animation duration based on how far the camera has to
+   * travel. Short hops = fast (220ms), long cinematic moves = slower (620ms).
+   * The distance component includes zoom delta as well, so a big zoom-in
+   * gets more frames to breathe.
+   */
+  _pickDuration(targetX, targetY, targetZoom) {
+    const dx = (targetX - this.x) * Math.max(this.zoom, 0.2);
+    const dy = (targetY - this.y) * Math.max(this.zoom, 0.2);
+    const posDist = Math.hypot(dx, dy);
+    // Zoom delta in log-space so going 0.2 → 2.0 feels the same as 0.5 → 5.0
+    const zoomDelta = Math.abs(Math.log(Math.max(0.01, targetZoom) / Math.max(0.01, this.zoom)));
+    // Weight: 1px position ≈ 0.004 zoom units (tuned by feel)
+    const combined = posDist + zoomDelta * 250;
+    // Clamp to [220, 620]
+    return Math.max(220, Math.min(620, 180 + combined * 0.65));
+  }
+
+  _beginAnim(targetX, targetY, targetZoom, duration) {
+    this._animStart = performance.now();
+    this._animDuration = duration;
+    this._animFromX = this.x;
+    this._animFromY = this.y;
+    this._animFromZ = this.zoom;
+    this.tx = targetX;
+    this.ty = targetY;
+    this.tz = Math.max(this.minZoom, Math.min(this.maxZoom, targetZoom));
     this._zoomVelocity = 0;
   }
 
-  /** Fit all points in view with padding. */
+  /**
+   * Smoothly center on a world position. Optional zoom. x, y, and zoom all
+   * interpolate together over a single distance-adaptive duration so the
+   * camera glides in one motion instead of zoom-teleporting then panning.
+   */
+  centerOn(wx, wy, zoom) {
+    const targetZoom = zoom != null ? zoom : this.zoom;
+    const duration = this._pickDuration(wx, wy, targetZoom);
+    this._overshootPhase = null;
+    this._overshootSettleZoom = null;
+    this._beginAnim(wx, wy, targetZoom, duration);
+  }
+
+  /**
+   * Smooth center + zoom with an elastic overshoot. Camera arcs past the
+   * target zoom by ~4%, then settles back. The overshoot runs as a second
+   * short animation once the main move completes (see update()). Gives
+   * "zoom to X" a satisfying punch without breaking synchronized interp.
+   */
+  centerOnWithOvershoot(wx, wy, zoom) {
+    const clamped = Math.max(this.minZoom, Math.min(this.maxZoom, zoom));
+    const isZoomingIn = clamped > this.zoom;
+    // The main animation aims PAST the final zoom; the settle phase in
+    // update() will then reel it back to `clamped`.
+    const inflated = isZoomingIn
+      ? Math.min(this.maxZoom, clamped * 1.04)
+      : Math.max(this.minZoom, clamped * 0.97);
+    const duration = this._pickDuration(wx, wy, inflated);
+    this._overshootPhase = 'out';
+    this._overshootSettleZoom = clamped;
+    this._beginAnim(wx, wy, inflated, duration);
+  }
+
+  /** Fit all points in view with padding — SNAPS immediately (no animation). */
   fitBounds(minX, minY, maxX, maxY, padding = 120) {
     this.tx = (minX + maxX) / 2;
     this.ty = (minY + maxY) / 2;
@@ -137,6 +250,34 @@ export class Viewport {
     this.x = this.tx;
     this.y = this.ty;
     this.zoom = this.tz;
+    this._animStart = null;
+    this._overshootPhase = null;
+    this._overshootSettleZoom = null;
+  }
+
+  /** Animate fit-bounds (smooth transition, synchronized x/y/zoom). */
+  fitBoundsAnimated(minX, minY, maxX, maxY, padding = 120) {
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const rangeX = maxX - minX + padding * 2;
+    const rangeY = maxY - minY + padding * 2;
+    const zoom = Math.max(this.minZoom, Math.min(this.maxZoom, Math.min(this.width / rangeX, this.height / rangeY)));
+    const duration = this._pickDuration(cx, cy, zoom);
+    this._overshootPhase = null;
+    this._overshootSettleZoom = null;
+    this._beginAnim(cx, cy, zoom, duration);
+  }
+
+  /**
+   * Is a world point currently inside the visible rectangle (with margin)?
+   * Used by HexCanvas.ensureVisible to decide whether to pan.
+   */
+  isVisible(wx, wy, margin = 40) {
+    const b = this.getVisibleBounds();
+    return wx >= b.minX + margin &&
+           wx <= b.maxX - margin &&
+           wy >= b.minY + margin &&
+           wy <= b.maxY - margin;
   }
 
   /** Get visible world rectangle. */

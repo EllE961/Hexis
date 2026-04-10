@@ -242,24 +242,39 @@ app.post('/api/folder/move', async (req, res) => {
 
 // DELETE /api/folder?path=...&recursive=true
 // Moves to trash when possible, falls back to permanent rm -rf.
+// Idempotent: if the path doesn't exist, returns ok (already deleted).
 app.delete('/api/folder', async (req, res) => {
   const { path: folderPath, recursive } = req.query;
   if (!folderPath) return res.status(400).json({ error: 'path required' });
   if (!isPathSafe(folderPath)) return res.status(403).json({ error: 'path outside repo' });
   try {
     const fullPath = resolve(REPO_PATH, folderPath);
+    const { stat, rm } = await import('fs/promises');
+
+    // Idempotent: nonexistent path is treated as already-deleted success.
+    // Prevents 500s on double-delete or retry after a successful trash call.
+    try {
+      await stat(fullPath);
+    } catch (statErr) {
+      if (statErr.code === 'ENOENT') {
+        return res.json({ ok: true, path: folderPath, alreadyGone: true });
+      }
+      throw statErr;
+    }
+
     try {
       const trashModule = await import('trash');
       const trash = trashModule.default;
       await trash(fullPath);
     } catch (trashErr) {
       console.warn('[trash] fallback to rm:', trashErr.message);
-      const { rm } = await import('fs/promises');
-      await rm(fullPath, { recursive: recursive === 'true', force: false });
+      // force: true so missing-file / permission-edge errors don't bubble up
+      await rm(fullPath, { recursive: recursive === 'true', force: true });
     }
     res.json({ ok: true, path: folderPath });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[DELETE /api/folder] failed:', err);
+    res.status(500).json({ error: err.message || String(err) });
   }
 });
 

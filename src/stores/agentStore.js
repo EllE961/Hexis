@@ -471,10 +471,44 @@ export const useAgentStore = create((set, get) => ({
       return;
     }
 
+    // ─── Chat mode bridge ───
+    // Chat turns emit events tagged with chatId as runId. We auto-create a
+    // lightweight "run" entry for each chat the first time we see it so the
+    // existing bee / agent / cellActivity rendering just works — chat bees
+    // land on the grid identical to coder bees, because under the hood
+    // they're the SAME runAgent call with the SAME event stream.
+    if (event.chatId && !get().runs.has(event.chatId)) {
+      set(s => {
+        const runs = new Map(s.runs);
+        runs.set(event.chatId, {
+          ...makeRun(event.chatId, '[chat]', null),
+          kind: 'chat',
+          status: 'running',
+        });
+        return { runs };
+      });
+    }
+
     // All other events must have a runId
     if (!runId) return;
     const run = get().runs.get(runId);
     if (!run) return;
+
+    // Chat turn lifecycle — mark the pseudo-run's status so the active
+    // chat count + bees stay in sync.
+    if (type === 'chat_turn_started') {
+      get()._updateRun(runId, { status: 'running' });
+    }
+    if (type === 'chat_turn_complete' || type === 'chat_turn_failed') {
+      get()._updateRun(runId, { status: 'done' });
+      // Clear the cellActivity for this chat so bees fly away / stop showing
+      // as working on the cell.
+      const activity = new Map(get().cellActivity);
+      for (const [fp, act] of activity) {
+        if (act.runId === runId) activity.delete(fp);
+      }
+      set({ cellActivity: activity });
+    }
 
     // ─── Research pipeline events ───
     if (type === 'research_started') {

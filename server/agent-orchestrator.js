@@ -707,6 +707,138 @@ export async function resumeTaskFn(taskId, additionalPrompt, repoPath, broadcast
   startTask(taskId, newPrompt, repoPath, broadcast, priorRun.focusFiles || [], { resumeSessionId: sessionId });
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// CHAT MODE — direct conversational agent, no pipeline
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Chat mode is "Claude Code directly, inside Hexis". One `runAgent` call per
+// user turn. Each turn resumes the previous SDK session via `resume:`, so
+// context accumulates like a real conversation. No Writer, no Classifier,
+// no Planner, no Reviewer — just a single agent with full tools, hooks,
+// memory, skills, and Serena.
+//
+// The caller (the Chat panel) maintains:
+//   - chatId   — stable across the whole conversation (UI grouping)
+//   - sessionId — SDK session_id from the previous response; null on first turn
+//
+// Each call returns:
+//   - sessionId — the NEW session_id to pass back on the next turn
+//   - text      — the assistant's reply
+//   - tokens    — per-turn usage
+//   - cost      — per-turn cost
+
+// Per-chat task state. Keyed by chatId so concurrent chats don't collide.
+// Each entry tracks aborted flag + session list (for cancellation) so the
+// Chat panel can hit a Stop button mid-turn.
+const chatTasks = new Map();
+
+/**
+ * Send a user message in a chat conversation and stream the assistant's
+ * response. Single runAgent call. Reuses the caller-supplied session id
+ * when present; starts a fresh session on first turn.
+ */
+export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts = {}) {
+  if (!userMessage?.trim()) return;
+
+  // Reuse or create the per-chat task container so we can abort mid-turn.
+  let task = chatTasks.get(chatId);
+  if (!task || task.done) {
+    task = {
+      aborted: false,
+      sessions: [],
+      approvalResolve: null,
+      worktreePath: null,
+      diffTracker: createDiffTracker(),
+    };
+    chatTasks.set(chatId, task);
+  }
+  task.aborted = false;
+  task.done = false;
+
+  const modelHint = opts.model === 'opus' ? 'chat_opus' : 'chat';
+  const profile = getProfile(modelHint);
+  const agentId = `${chatId}::chat`;
+  const resumeSessionId = opts.sessionId || null;
+
+  const taggedBroadcast = (event) => {
+    broadcast({ ...event, chatId, runId: chatId });
+  };
+
+  taggedBroadcast({
+    type: 'chat_turn_started',
+    userMessage,
+    model: profile.model,
+    resuming: !!resumeSessionId,
+  });
+  taggedBroadcast({ type: 'agent_spawned', agentId, role: 'coder', model: profile.model });
+
+  try {
+    const result = await runAgent({
+      prompt: userMessage,
+      cwd: repoPath,
+      // No custom systemPrompt — let the Claude Code preset + settingSources
+      // (which loads .claude/CLAUDE.md and the skills) provide the agent's
+      // persona. This is the closest thing to `claude` CLI behavior.
+      systemPrompt: '',
+      tools: CODER_TOOLS,
+      permissionMode: 'bypassPermissions',
+      resume: resumeSessionId || undefined,
+      // Sonnet by default, Opus on request
+      ...profile,
+    }, task, taggedBroadcast, agentId);
+
+    taggedBroadcast({
+      type: 'chat_turn_complete',
+      agentId,
+      sessionId: result.sessionId,
+      text: result.text,
+      tokensUsed: result.tokens.input + result.tokens.output,
+      cost: result.cost,
+      cacheHits: { read: result.tokens.cacheRead, creation: result.tokens.cacheCreation },
+    });
+    taggedBroadcast({
+      type: 'agent_complete',
+      agentId,
+      tokensUsed: result.tokens.output,
+      summary: 'Turn complete',
+    });
+
+    task.done = true;
+    return {
+      sessionId: result.sessionId,
+      text: result.text,
+      tokens: result.tokens.input + result.tokens.output,
+      cost: result.cost,
+    };
+  } catch (err) {
+    task.done = true;
+    taggedBroadcast({
+      type: 'agent_error',
+      agentId,
+      error: err.message || String(err),
+    });
+    taggedBroadcast({
+      type: 'chat_turn_failed',
+      error: err.message || String(err),
+    });
+    throw err;
+  }
+}
+
+/** Abort an in-flight chat turn. */
+export function cancelChat(chatId) {
+  const task = chatTasks.get(chatId);
+  if (!task) return;
+  task.aborted = true;
+  for (const s of task.sessions) { try { s.close(); } catch {} }
+}
+
+/** Clean up a chat's state when the UI closes it. */
+export function disposeChat(chatId) {
+  cancelChat(chatId);
+  chatTasks.delete(chatId);
+}
+
 // ─── SDK query helper ───
 
 function classifyError(err) {

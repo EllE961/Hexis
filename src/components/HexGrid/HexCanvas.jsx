@@ -5,8 +5,8 @@
 
 import { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
 import { Viewport } from './Viewport.js';
-import { hexToPixel, pixelToHex, getVisibleHexRange, isHexVisible, hexNeighbors, hexPath } from '../../utils/hexMath.js';
-import { computeLayout } from '../../utils/hexLayout.js';
+import { hexToPixel, pixelToHex, getVisibleHexRange, isHexVisible, hexNeighbors, hexPath } from '../utils/hexMath.js';
+import { computeLayout } from '../utils/hexLayout.js';
 import { drawCell, drawEmptyCell } from './CellRenderer.js';
 import { drawGroups, drawGroupLabels, drawGroupHighlight, drawBreadcrumbSpine } from './GroupRenderer.js';
 import { BeeSystem } from './BeeSystem.js';
@@ -149,7 +149,132 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
   const cellDragRef = useRef(makeCellDragState());
   const [, forceRender] = useState(0);
 
-  // Expose imperative methods to App.jsx (drop glow trigger + hard refresh)
+  // ── Camera focus helpers (used by double-click AND imperative handle) ──
+
+  /**
+   * Zoom the camera in on a file cell or group region with an elastic
+   * bounce. Retries for up to ~500 ms if the target isn't in the layout
+   * yet — lets callers fire-and-forget immediately after an optimistic
+   * file/folder creation without waiting for React to commit the layout.
+   *
+   * If `opts.anchorSx` / `opts.anchorSy` are supplied (canvas-local screen
+   * coords), the zoom keeps the target under THAT screen point instead of
+   * centering on it — used for double-click where we want the clicked hex
+   * to stay under the mouse as the camera zooms in around it.
+   */
+  const zoomToItemImpl = useCallback((path, kind = 'file', opts = {}) => {
+    if (!path) return;
+    const anchored = opts.anchorSx != null && opts.anchorSy != null;
+    const attempt = (retries) => {
+      const vp = viewportRef.current;
+      const layout = layoutRef.current;
+      if (!vp || !layout) return;
+
+      if (kind === 'file') {
+        const cell = layout.cells.get(path);
+        if (!cell) {
+          if (retries > 0) {
+            requestAnimationFrame(() => attempt(retries - 1));
+          }
+          return;
+        }
+        if (opts.instant) {
+          vp.x = vp.tx = cell.x;
+          vp.y = vp.ty = cell.y;
+          vp.zoom = vp.tz = 2.0;
+        } else if (anchored) {
+          // Keep the clicked cell under the mouse as the camera zooms in
+          vp.zoomToAnchored(cell.x, cell.y, 2.0, opts.anchorSx, opts.anchorSy);
+        } else {
+          vp.centerOnWithOvershoot(cell.x, cell.y, 2.0);
+        }
+      } else {
+        const folder = layout.folders.get(path);
+        if (!folder) {
+          if (retries > 0) {
+            requestAnimationFrame(() => attempt(retries - 1));
+          }
+          return;
+        }
+        const padding = HEX_SIZE * 2;
+        const extent = folder.ring * HEX_SIZE * 2 + padding;
+        const minX = folder.x - extent;
+        const maxX = folder.x + extent;
+        const minY = folder.y - extent;
+        const maxY = folder.y + extent;
+        if (opts.instant) {
+          vp.fitBounds(minX, minY, maxX, maxY, padding);
+        } else if (anchored) {
+          // Pick a zoom that fits the folder, then anchor it under the
+          // mouse so the clicked region stays in place.
+          const rangeX = (maxX - minX) + padding * 2;
+          const rangeY = (maxY - minY) + padding * 2;
+          const targetZoom = Math.min(vp.width / rangeX, vp.height / rangeY);
+          vp.zoomToAnchored(folder.x, folder.y, targetZoom, opts.anchorSx, opts.anchorSy);
+        } else {
+          vp.fitBoundsAnimated(minX, minY, maxX, maxY, padding);
+        }
+      }
+    };
+    // Up to ~30 frames (~500 ms at 60fps) so optimistic creates land cleanly.
+    attempt(30);
+  }, []);
+
+  /** If the item is offscreen, pan to it (no zoom change). */
+  const ensureVisibleImpl = useCallback((path, kind = 'file') => {
+    if (!path) return;
+    const attempt = (retries) => {
+      const vp = viewportRef.current;
+      const layout = layoutRef.current;
+      if (!vp || !layout) return;
+      let wx, wy;
+      if (kind === 'file') {
+        const cell = layout.cells.get(path);
+        if (!cell) {
+          if (retries > 0) requestAnimationFrame(() => attempt(retries - 1));
+          return;
+        }
+        wx = cell.x;
+        wy = cell.y;
+      } else {
+        const folder = layout.folders.get(path);
+        if (!folder) {
+          if (retries > 0) requestAnimationFrame(() => attempt(retries - 1));
+          return;
+        }
+        wx = folder.x;
+        wy = folder.y;
+      }
+      if (!vp.isVisible(wx, wy, 60)) {
+        vp.centerOn(wx, wy);
+      }
+    };
+    attempt(30);
+  }, []);
+
+  /** Fit all content in view with a smooth animated transition. */
+  const zoomToFitAll = useCallback(() => {
+    const vp = viewportRef.current;
+    const layout = layoutRef.current;
+    if (!vp || !layout) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    if (layout.folders?.size > 0) {
+      for (const f of layout.folders.values()) {
+        minX = Math.min(minX, f.x - f.radius);
+        minY = Math.min(minY, f.y - f.radius);
+        maxX = Math.max(maxX, f.x + f.radius);
+        maxY = Math.max(maxY, f.y + f.radius);
+      }
+    } else {
+      for (const c of layout.cells.values()) {
+        minX = Math.min(minX, c.x); minY = Math.min(minY, c.y);
+        maxX = Math.max(maxX, c.x); maxY = Math.max(maxY, c.y);
+      }
+    }
+    if (minX !== Infinity) vp.fitBoundsAnimated(minX, minY, maxX, maxY, HEX_SIZE * 3);
+  }, []);
+
+  // Expose imperative methods to App.jsx (drop glow trigger + hard refresh + camera)
   useImperativeHandle(ref, () => ({
     /**
      * Start a 5-second landing glow on the given file or group path.
@@ -170,7 +295,13 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
       layoutHashRef.current = '';
       forceRender(n => n + 1);
     },
-  }), []);
+    /** Zoom in on a file or group with an elastic overshoot. */
+    zoomToItem: (path, kind = 'file', opts = {}) => zoomToItemImpl(path, kind, opts),
+    /** Pan to a file or group only if it's offscreen (no zoom change). */
+    ensureVisible: (path, kind = 'file') => ensureVisibleImpl(path, kind),
+    /** Fit the entire layout in view (smooth animated). */
+    zoomToFitAll: () => zoomToFitAll(),
+  }), [zoomToItemImpl, ensureVisibleImpl, zoomToFitAll]);
 
   // Neutral stone tone for root-level files — they are not a group,
   // so they should read visually distinct from any honey-colored cluster.
@@ -752,23 +883,66 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
             const cell = layout.cells.get(path);
             if (!cell) continue;
             if (!isHexVisible(cell.q, cell.r, hexRange)) continue;
+            // Glow the actual cell border (not an oversized halo): trace
+            // the cell's own hex outline with a strong shadow blur. Two
+            // passes — outer soft halo + sharp inner stroke — give a
+            // clean "lit from within" look.
             ctx.save();
-            ctx.shadowBlur = 24 * pulse;
-            ctx.shadowColor = `rgba(255, 255, 255, ${0.9 * alpha})`;
-            hexPath(ctx, cell.x, cell.y, HEX_SIZE * 1.08);
-            ctx.strokeStyle = `rgba(255, 255, 255, ${0.95 * alpha})`;
-            ctx.lineWidth = 2.8;
+            ctx.shadowBlur = 28 * pulse;
+            ctx.shadowColor = `rgba(255, 255, 255, ${0.95 * alpha})`;
+            hexPath(ctx, cell.x, cell.y, HEX_SIZE);
+            ctx.strokeStyle = `rgba(255, 255, 255, ${0.9 * alpha})`;
+            ctx.lineWidth = 3.2;
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+            // Second crisp pass on top (no shadow) for sharp contour
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.lineWidth = 1.6;
             ctx.stroke();
             ctx.restore();
           } else {
-            const folder = layout.folders.get(path);
-            if (!folder) continue;
+            // Glow the ACTUAL group boundary by tracing the edges between
+            // cells that belong to the group and cells that don't. This
+            // matches the ridge border drawn by GroupRenderer, not a
+            // single oversized hex.
+            const regionCells = layout.groupRegions?.get(path);
+            if (!regionCells || regionCells.length === 0) continue;
+            const cellSet = new Set(regionCells.map(c => `${c.q},${c.r}`));
+            const NEIGHBOR_TO_EDGE = [5, 0, 1, 2, 3, 4];
             ctx.save();
-            ctx.shadowBlur = 30 * pulse;
-            ctx.shadowColor = `rgba(255, 255, 255, ${0.85 * alpha})`;
+            ctx.shadowBlur = 34 * pulse;
+            ctx.shadowColor = `rgba(255, 255, 255, ${0.95 * alpha})`;
             ctx.strokeStyle = `rgba(255, 255, 255, ${0.9 * alpha})`;
-            ctx.lineWidth = 3.2;
-            hexPath(ctx, folder.x, folder.y, folder.ring * HEX_SIZE * 1.85);
+            ctx.lineWidth = 3.6;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            for (const c of regionCells) {
+              if (!isHexVisible(c.q, c.r, hexRange)) continue;
+              const pos = hexToPixel(c.q, c.r, HEX_SIZE);
+              const neighbors = hexNeighbors(c.q, c.r);
+              for (let i = 0; i < 6; i++) {
+                const n = neighbors[i];
+                if (cellSet.has(`${n.q},${n.r}`)) continue;
+                const ei = NEIGHBOR_TO_EDGE[i];
+                const a1 = (Math.PI / 3) * ei;
+                const a2 = (Math.PI / 3) * ((ei + 1) % 6);
+                ctx.moveTo(
+                  pos.x + HEX_SIZE * Math.cos(a1),
+                  pos.y + HEX_SIZE * Math.sin(a1),
+                );
+                ctx.lineTo(
+                  pos.x + HEX_SIZE * Math.cos(a2),
+                  pos.y + HEX_SIZE * Math.sin(a2),
+                );
+              }
+            }
+            ctx.stroke();
+            // Sharp overlay
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.lineWidth = 1.8;
             ctx.stroke();
             ctx.restore();
           }
@@ -1100,7 +1274,7 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
     }
   }, [onCellHover]);
 
-  const lastClickInfo = useRef({ path: null, time: 0 });
+  const lastClickInfo = useRef({ key: null, time: 0, lastClickKey: null, lastClickTime: 0 });
 
   const onPointerUp = useCallback((e) => {
     const down = mouseDownRef.current;
@@ -1151,23 +1325,63 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
 
     if (!down || down.dragged || e.button !== 0) return;
 
-    const fp = hitTest(e);
+    const rich = hitTestRich(e);
+    const fp = rich?.kind === 'file' ? rich.filePath : null;
     const now = Date.now();
     const prev = lastClickInfo.current;
 
-    // Check for double-click (same cell, within 500ms)
-    if (fp && fp === prev.path && now - prev.time < 500) {
-      lastClickInfo.current = { path: null, time: 0 };
+    // Double-click → zoom. Same target within 500ms toggles between
+    // "zoom in to item" and "zoom out to fit-all".
+    // Key identifies the target: file path, or 'group:<path>' for groups.
+    const targetKey = fp || (rich?.kind === 'group' || rich?.kind === 'empty'
+      ? `group:${rich.groupPath || ''}`
+      : null);
+
+    if (targetKey && targetKey === prev.key && now - prev.time < 500) {
+      lastClickInfo.current = { key: null, time: 0 };
+      // Repeat double-click on same target → zoom out to fit everything
       const layout = layoutRef.current;
-      const cell = layout?.cells.get(fp);
-      if (cell && viewportRef.current) {
-        const newZoom = Math.min(2.0, viewportRef.current.zoom * 1.5);
-        viewportRef.current.centerOn(cell.x, cell.y, newZoom);
-        hoveredCellRef.current = null;
+      if (layout && viewportRef.current) {
+        zoomToFitAll();
       }
-      onCellDoubleClick?.(fp);
-    } else {
-      lastClickInfo.current = { path: fp, time: now };
+      hoveredCellRef.current = null;
+      if (fp) onCellDoubleClick?.(fp);
+      return;
+    }
+
+    if (targetKey && prev.key === targetKey && now - prev.time < 500) {
+      // (unreachable but keep for clarity)
+    }
+
+    // First double-click: detect via simple "same cell within 500ms" rule
+    // against the LAST single click.
+    if (targetKey && targetKey === prev.lastClickKey && now - prev.lastClickTime < 500) {
+      lastClickInfo.current = { key: targetKey, time: now, lastClickKey: null, lastClickTime: 0 };
+      // Capture the mouse position so the zoom anchors the clicked hex
+      // under the cursor (VS Code / Google Maps style) instead of teleporting
+      // the camera to put the hex in the dead center of the screen.
+      const canvas = canvasRef.current;
+      const anchorPos = canvas ? getMousePos(e, canvas) : null;
+      const anchorOpts = anchorPos
+        ? { anchorSx: anchorPos.x, anchorSy: anchorPos.y }
+        : {};
+      if (fp) {
+        zoomToItemImpl(fp, 'file', anchorOpts);
+        onCellDoubleClick?.(fp);
+      } else if (rich?.groupPath) {
+        zoomToItemImpl(rich.groupPath, 'group', anchorOpts);
+      }
+      hoveredCellRef.current = null;
+      return;
+    }
+
+    // Single click — record for potential double-click on next event
+    lastClickInfo.current = {
+      key: null, time: 0,
+      lastClickKey: targetKey,
+      lastClickTime: now,
+    };
+    if (fp) {
       onCellClick?.(fp, { ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
     }
   }, [onCellClick, onCellDoubleClick, onBeeClick]);

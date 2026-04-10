@@ -10,12 +10,20 @@ import { create } from 'zustand';
 const STORAGE_KEY = 'hexis-panel-layout';
 
 const DEFAULTS = {
-  ai:        { mode: 'docked', dock: 'left',   width: 480, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 320, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
-  git:       { mode: 'docked', dock: 'left',   width: 360, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 1, minWidth: 280, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
-  editor:    { mode: 'docked', dock: 'right',  width: 700, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 350, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
-  search:    { mode: 'docked', dock: 'left',   width: 420, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 2, minWidth: 280, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
-  bookmarks: { mode: 'docked', dock: 'left',   width: 340, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 3, minWidth: 260, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
-  history:   { mode: 'docked', dock: 'left',   width: 340, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 4, minWidth: 260, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  // The editor docks to the LEFT now; the hex grid fills the remaining
+  // center area. This matches VS Code's muscle memory and lets the
+  // embedded file tree sidebar share the same left half.
+  editor:    { mode: 'docked', dock: 'left',   width: 820, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 350, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  // Secondary panels dock to the RIGHT so they don't fight the editor
+  // for real estate.
+  ai:        { mode: 'docked', dock: 'right',  width: 480, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 320, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  // Chat mode: "Claude Code directly inside Hexis" — one-shot conversational
+  // agent. Defaults to visible because it's the primary day-to-day interface.
+  chat:      { mode: 'docked', dock: 'right',  width: 520, height: null, x: 0, y: 0, visible: true,  zIndex: 30, order: 0, minWidth: 360, minHeight: 240, maximized: false, preMaxState: null, edgeCollapsed: false },
+  git:       { mode: 'docked', dock: 'right',  width: 360, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 1, minWidth: 280, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  search:    { mode: 'docked', dock: 'right',  width: 420, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 2, minWidth: 280, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  bookmarks: { mode: 'docked', dock: 'right',  width: 340, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 3, minWidth: 260, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
+  history:   { mode: 'docked', dock: 'right',  width: 340, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 4, minWidth: 260, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
   terminal:  { mode: 'docked', dock: 'bottom', width: null, height: 260, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 300, minHeight: 120, maximized: false, preMaxState: null, edgeCollapsed: false },
   timeline:  { mode: 'docked', dock: 'bottom', width: null, height: 80,  x: 0, y: 0, visible: false, zIndex: 30, order: 1, minWidth: 300, minHeight: 60,  maximized: false, preMaxState: null, edgeCollapsed: false },
   taskboard: { mode: 'floating', dock: null,   width: 1050, height: 650, x: 'center', y: 'center', visible: false, zIndex: 30, order: 0, minWidth: 600, minHeight: 400, maximized: false, preMaxState: null, edgeCollapsed: false },
@@ -51,6 +59,23 @@ function saveLayout(panels) {
 
 function initPanels() {
   const saved = loadLayout();
+
+  // One-shot migration: the editor used to dock RIGHT and the explorer
+  // was a standalone left panel. The new layout puts the editor on the
+  // LEFT (with the embedded explorer sidebar inside) and drops the
+  // stand-alone `explorer` panel. Heal both on first load after upgrade.
+  const MIGRATION_KEY = 'hexis-editor-migrated-to-left';
+  let didMigrate = false;
+  try { didMigrate = localStorage.getItem(MIGRATION_KEY) === '1'; } catch {}
+  if (!didMigrate && saved) {
+    if (saved.editor && saved.editor.dock === 'right') {
+      saved.editor = { ...saved.editor, dock: 'left', order: 0 };
+    }
+    // Drop stale `explorer` entry — it lives inside the editor now
+    if (saved.explorer) delete saved.explorer;
+    try { localStorage.setItem(MIGRATION_KEY, '1'); } catch {}
+  }
+
   const panels = {};
   for (const [id, def] of Object.entries(DEFAULTS)) {
     const merged = { ...def, ...(saved?.[id] || {}) };

@@ -1,11 +1,13 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import HexCanvas from './components/HexGrid/HexCanvas.jsx';
 import EditorPanel from './components/Editor/EditorPanel.jsx';
 import SearchPanel from './components/search/SearchPanel.jsx';
 import BookmarksPanel from './components/panels/BookmarksPanel.jsx';
+import FileTreePanel from './components/panels/FileTreePanel.jsx';
 import LocalHistoryPanel from './components/panels/LocalHistoryPanel.jsx';
 import GitPanel from './components/GitPanel/GitPanel.jsx';
 import AIPanel from './components/AIPanel/AIPanel.jsx';
+import ChatPanel from './components/ChatPanel/ChatPanel.jsx';
 import HistoryTimeline from './components/Timeline/HistoryTimeline.jsx';
 import TerminalPanel from './components/Terminal/TerminalPanel.jsx';
 import CommandPalette from './components/CommandPalette/CommandPalette.jsx';
@@ -16,6 +18,7 @@ import { useWorkspaceStore } from './stores/workspaceStore.js';
 import WelcomeScreen from './components/WelcomeScreen.jsx';
 import { useGitStore } from './stores/gitStore.js';
 import { useAgentStore, AGENT_ROLES } from './stores/agentStore.js';
+import { useChatStore } from './stores/chatStore.js';
 import { useTestStore } from './stores/testStore.js';
 import { usePrefsStore } from './stores/prefsStore.js';
 import { usePanelStore } from './stores/panelStore.js';
@@ -23,13 +26,14 @@ import TaskBoard from './components/TaskBoard/TaskBoard.jsx';
 import Onboarding from './components/Onboarding/Onboarding.jsx';
 import { MenuBar } from './components/MenuBar/MenuBar.jsx';
 import { ContextMenu } from './components/ContextMenu/ContextMenu.jsx';
-import { buildContextMenuItems } from './components/ContextMenu/hexContextMenu.js';
+import { buildContextMenuItems } from './components/ContextMenu/hexContextMenu.jsx';
 import NameInputModal from './components/modals/NameInputModal.jsx';
 import ConfirmModal from './components/modals/ConfirmModal.jsx';
 import { useClipboardStore } from './stores/clipboardStore.js';
-import { useFileOpsHistoryStore } from './stores/fileOpsHistoryStore.js';
+import { useFileOpsHistoryStore, MAX_CONTENT_BYTES as HISTORY_MAX_CONTENT_BYTES } from './stores/fileOpsHistoryStore.js';
 import { useSelectionStore } from './stores/selectionStore.js';
 import { useLayoutStateStore } from './stores/layoutStateStore.js';
+import { Icon } from './components/common/Icon.jsx';
 import { W } from './theme/window-tokens.js';
 
 const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
@@ -273,6 +277,8 @@ export default function App() {
             const result = await ed.createFile(filePath);
             if (result?.ok === false) return result.error || 'Create failed';
             optimisticallyAddFile(filePath, targetGroup);
+            hexCanvasRef.current?.markRecentDrop(filePath, 'file');
+            hexCanvasRef.current?.zoomToItem(filePath, 'file');
             setNameModal(null);
           },
         });
@@ -293,6 +299,8 @@ export default function App() {
             const result = await ed.createFolder(folderPath);
             if (result?.ok === false) return result.error || 'Create folder failed';
             optimisticallyAddFolder(folderPath, targetParent);
+            hexCanvasRef.current?.markRecentDrop(folderPath, 'group');
+            hexCanvasRef.current?.zoomToItem(folderPath, 'group');
             setNameModal(null);
           },
         });
@@ -330,8 +338,27 @@ export default function App() {
         break;
 
       // ─── Edit ───
-      case 'edit:undo': document.execCommand('undo'); break;
-      case 'edit:redo': document.execCommand('redo'); break;
+      case 'edit:undo': {
+        // File-ops undo if editor not focused, CodeMirror text undo if it is
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        if (editorFocused) {
+          document.execCommand('undo');
+        } else {
+          const ok = await useFileOpsHistoryStore.getState().undo(historyDeps);
+          if (ok) refreshWorkspace();
+        }
+        break;
+      }
+      case 'edit:redo': {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        if (editorFocused) {
+          document.execCommand('redo');
+        } else {
+          const ok = await useFileOpsHistoryStore.getState().redo(historyDeps);
+          if (ok) refreshWorkspace();
+        }
+        break;
+      }
       case 'edit:cut': document.execCommand('cut'); break;
       case 'edit:copy': document.execCommand('copy'); break;
       case 'edit:paste': document.execCommand('paste'); break;
@@ -362,6 +389,12 @@ export default function App() {
         break;
       case 'view:outline':
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', ctrlKey: true, shiftKey: true }));
+        break;
+      case 'view:explorer':
+        // Explorer now lives INSIDE the editor as a collapsible sidebar.
+        // Make sure the editor panel is visible, then dispatch the toggle.
+        usePanelStore.getState().showPanel('editor');
+        window.dispatchEvent(new Event('hexis:toggle-explorer'));
         break;
       case 'view:search':          togglePanel('search'); break;
       case 'view:git':             togglePanel('git'); break;
@@ -526,6 +559,7 @@ export default function App() {
       items: [
         { id: 'view:commandPalette', label: 'Command Palette…', shortcut: 'Ctrl+K', mnemonic: 'C' },
         { separator: true },
+        { id: 'view:explorer', label: 'Explorer', shortcut: 'Ctrl+Shift+E', mnemonic: 'E' },
         { id: 'view:outline', label: 'Outline', shortcut: 'Ctrl+Shift+O', mnemonic: 'O', checked: panels.editor?.visible },
         { id: 'view:search', label: 'Search', shortcut: 'Ctrl+Shift+F', mnemonic: 'S', checked: panels.search?.visible },
         { id: 'view:git', label: 'Source Control', shortcut: 'Ctrl+G', mnemonic: 'G', checked: panels.git?.visible },
@@ -597,6 +631,12 @@ export default function App() {
   // workspace gets its own persisted group positions + ring sizes.
   useEffect(() => {
     useLayoutStateStore.getState().setWorkspace(workspace || null);
+  }, [workspace]);
+
+  // Sync the file-ops history store with the active workspace so
+  // undo/redo stacks are per-workspace and survive reloads.
+  useEffect(() => {
+    useFileOpsHistoryStore.getState().setWorkspace(workspace || null);
   }, [workspace]);
 
   // Load project. Re-runs whenever the workspace changes (Tauri folder
@@ -718,11 +758,17 @@ export default function App() {
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
-        // Route agent events to the agent store
+        // Route agent events to the agent store (also handles chat_* events
+        // via the bee/run bridge so chat turns spawn bees on the hex grid).
         if (data.type?.startsWith('agent_') || data.type?.startsWith('plan_') ||
             data.type?.startsWith('task_') || data.type?.startsWith('subtask_') ||
+            data.type?.startsWith('chat_') || data.type?.startsWith('research_') ||
             data.type === 'tokens_update') {
           onAgentEvent(data);
+        }
+        // Chat stream tokens + lifecycle → chat store (per-chat streamBuffer).
+        if (data.chatId && (data.type === 'agent_stream' || data.type?.startsWith('chat_'))) {
+          useChatStore.getState().onChatEvent(data);
         }
         // File-system changes → debounced workspace refresh
         if (data.type === 'fileChange' || data.type === 'fs_change' || data.type === 'batch') {
@@ -847,10 +893,13 @@ export default function App() {
           refreshWorkspace();
         } else if (batchOps.length > 0) {
           history.push({ kind: 'batch', ops: batchOps });
-          // 5s landing glow on each successfully moved file
+          // 5s landing glow on each successfully moved file + pan to
+          // the last one so the user can see where the batch landed.
           for (const op of batchOps) {
             hexCanvasRef.current?.markRecentDrop(op.toPath, 'file');
           }
+          const lastOp = batchOps[batchOps.length - 1];
+          if (lastOp) hexCanvasRef.current?.ensureVisible(lastOp.toPath, 'file');
           try { useGitStore.getState().fetchStatus(); } catch {}
         }
         sel.clear();
@@ -869,6 +918,7 @@ export default function App() {
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'file' });
         hexCanvasRef.current?.markRecentDrop(to, 'file');
+        hexCanvasRef.current?.ensureVisible(to, 'file');
         // Don't re-scan — the optimistic patch is the truth.
         // Just poll git for fresh status since the move may have changed it.
         try { useGitStore.getState().fetchStatus(); } catch {}
@@ -902,6 +952,7 @@ export default function App() {
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'folder' });
         hexCanvasRef.current?.markRecentDrop(to, 'group');
+        hexCanvasRef.current?.ensureVisible(to, 'group');
         try { useGitStore.getState().fetchStatus(); } catch {}
       }
     }
@@ -939,7 +990,7 @@ export default function App() {
       const toGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '(root)';
       title = 'Move file?';
       message = (
-        <>Move <code style={{ color: '#F0A030' }}>{from.split('/').pop()}</code> from <code style={{ color: '#8B949E' }}>{fromGroup}</code> to <code style={{ color: '#58A6FF' }}>{toGroup}</code>?</>
+        <>Move <code style={{ color: W.accent }}>{from.split('/').pop()}</code> from <code style={{ color: W.textDim }}>{fromGroup}</code> to <code style={{ color: W.blue }}>{toGroup}</code>?</>
       );
       details = `${from}\n     ↓\n${to}`;
       confirmLabel = 'Move file';
@@ -948,7 +999,7 @@ export default function App() {
       const toParent = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '(root)';
       title = 'Move folder?';
       message = (
-        <>Move folder <code style={{ color: '#F0A030' }}>{from.split('/').pop()}</code> and ALL its contents from <code style={{ color: '#8B949E' }}>{fromParent}</code> to <code style={{ color: '#58A6FF' }}>{toParent}</code>?</>
+        <>Move folder <code style={{ color: W.accent }}>{from.split('/').pop()}</code> and ALL its contents from <code style={{ color: W.textDim }}>{fromParent}</code> to <code style={{ color: W.blue }}>{toParent}</code>?</>
       );
       details = `${from}\n     ↓\n${to}\n\nWARNING: this moves every file inside the folder.`;
       confirmLabel = 'Move folder';
@@ -1095,17 +1146,33 @@ export default function App() {
         setConfirmModal({
           title: 'Delete file?',
           message: (
-            <>Delete <code style={{ color: '#EF4444' }}>{filePath.split('/').pop()}</code>? It will be moved to the system recycle bin — you can restore it from there.</>
+            <>Delete <code style={{ color: W.red }}>{filePath.split('/').pop()}</code>? It will be moved to the system recycle bin — <b>Ctrl+Z</b> to undo.</>
           ),
           details: filePath,
           destructive: true,
           confirmLabel: 'Delete',
           onConfirm: async () => {
             setConfirmModal(null);
+            // Capture content BEFORE deletion so we can restore it on undo.
+            // Files > MAX_CONTENT_BYTES are marked unrestorable.
+            let capturedContent = null;
+            try {
+              const raw = await ed.readFileContent(filePath);
+              if (raw != null && raw.length <= HISTORY_MAX_CONTENT_BYTES) {
+                capturedContent = raw;
+              }
+            } catch { /* unreadable — accept unrestorable */ }
             // Optimistic remove
             setFiles(prev => prev.filter(f => f.path !== filePath));
             try {
               await ed.deleteFile(filePath);
+              // Push undo record (content = null → unrestorable)
+              useFileOpsHistoryStore.getState().push({
+                kind: 'delete',
+                path: filePath,
+                entity: 'file',
+                content: capturedContent,
+              });
               try { useGitStore.getState().fetchStatus(); } catch {}
             } catch (err) {
               if (snapshot) setFiles(prev => [...prev, snapshot]);
@@ -1126,6 +1193,8 @@ export default function App() {
             const result = await ed.createFile(filePath);
             if (result?.ok === false) return result.error || 'Create failed';
             optimisticallyAddFile(filePath, groupPath);
+            hexCanvasRef.current?.markRecentDrop(filePath, 'file');
+            hexCanvasRef.current?.zoomToItem(filePath, 'file');
             setNameModal(null);
           },
         });
@@ -1142,6 +1211,8 @@ export default function App() {
             const result = await ed.createFolder(folderPath);
             if (result?.ok === false) return result.error || 'Create folder failed';
             optimisticallyAddFolder(folderPath, parentGroup);
+            hexCanvasRef.current?.markRecentDrop(folderPath, 'group');
+            hexCanvasRef.current?.zoomToItem(folderPath, 'group');
             setNameModal(null);
           },
         });
@@ -1156,6 +1227,8 @@ export default function App() {
             const result = await ed.createFile(name);
             if (result?.ok === false) return result.error || 'Create failed';
             optimisticallyAddFile(name, '.');
+            hexCanvasRef.current?.markRecentDrop(name, 'file');
+            hexCanvasRef.current?.zoomToItem(name, 'file');
             setNameModal(null);
           },
         });
@@ -1168,8 +1241,10 @@ export default function App() {
           placeholder: 'folder-name',
           onSubmit: async (name) => {
             const result = await ed.createFolder(name);
-            if (result?.ok === false) return result.error || 'Create folder failed';
+            if (result?.ok === false) return result.error || 'Create failed';
             optimisticallyAddFolder(name, '.');
+            hexCanvasRef.current?.markRecentDrop(name, 'group');
+            hexCanvasRef.current?.zoomToItem(name, 'group');
             setNameModal(null);
           },
         });
@@ -1202,19 +1277,46 @@ export default function App() {
         setConfirmModal({
           title: 'Delete folder?',
           message: (
-            <>Delete <code style={{ color: '#EF4444' }}>{groupPath}</code> and ALL its contents? {fileCount > 0 && <><strong>{fileCount} file{fileCount === 1 ? '' : 's'}</strong></>}{subGroupCount > 0 && <> and <strong>{subGroupCount} sub-folder{subGroupCount === 1 ? '' : 's'}</strong></>}{fileCount + subGroupCount === 0 && <>the empty folder</>} will be moved to the system recycle bin.</>
+            <>Delete <code style={{ color: W.red }}>{groupPath}</code> and ALL its contents? {fileCount > 0 && <><strong>{fileCount} file{fileCount === 1 ? '' : 's'}</strong></>}{subGroupCount > 0 && <> and <strong>{subGroupCount} sub-folder{subGroupCount === 1 ? '' : 's'}</strong></>}{fileCount + subGroupCount === 0 && <>the empty folder</>} will be moved to the system recycle bin.</>
           ),
           details: snapshotFiles.slice(0, 15).map(f => f.path).join('\n') + (fileCount > 15 ? `\n... +${fileCount - 15} more files` : ''),
           destructive: true,
           confirmLabel: `Delete ${fileCount + subGroupCount + 1} item${fileCount + subGroupCount === 0 ? '' : 's'}`,
           onConfirm: async () => {
             setConfirmModal(null);
+            // Capture each descendant file's content BEFORE deletion so
+            // Ctrl+Z can restore the entire subtree in one operation.
+            // Files > MAX_CONTENT_BYTES are recorded unrestorable.
+            const captures = await Promise.all(
+              snapshotFiles.map(async (f) => {
+                try {
+                  const raw = await ed.readFileContent(f.path);
+                  return {
+                    path: f.path,
+                    content: raw != null && raw.length <= HISTORY_MAX_CONTENT_BYTES ? raw : null,
+                  };
+                } catch {
+                  return { path: f.path, content: null };
+                }
+              }),
+            );
             // Optimistic remove
             setFiles(prev => prev.filter(f => !(f.path === groupPath || f.path.startsWith(prefix))));
             setGroups(prev => prev.filter(g => !(g.path === groupPath || g.path.startsWith(prefix))));
             try {
               const r = await ed.deleteFolder(groupPath);
               if (r?.ok === false) throw new Error(r.error || 'Delete failed');
+              // Push a batch op: one delete per captured file so Ctrl+Z
+              // restores the tree. Dirs are implicit (create re-mkdirs).
+              const batchOps = captures.map((c) => ({
+                kind: 'delete',
+                path: c.path,
+                entity: 'file',
+                content: c.content,
+              }));
+              if (batchOps.length > 0) {
+                useFileOpsHistoryStore.getState().push({ kind: 'batch', ops: batchOps });
+              }
               try { useGitStore.getState().fetchStatus(); } catch {}
             } catch (err) {
               // Rollback
@@ -1238,7 +1340,7 @@ export default function App() {
         setConfirmModal({
           title: kind === 'file' ? 'Move file?' : 'Move folder?',
           message: (
-            <>Move <code style={{ color: '#F0A030' }}>{leafName}</code> to <code style={{ color: '#58A6FF' }}>{destLabel}</code>?</>
+            <>Move <code style={{ color: W.accent }}>{leafName}</code> to <code style={{ color: W.blue }}>{destLabel}</code>?</>
           ),
           details: `${path}\n     ↓\n${newPath}`,
           destructive: false,
@@ -1377,6 +1479,11 @@ export default function App() {
         e.preventDefault();
         togglePanel('ai');
       }
+      // Ctrl+J: toggle Chat panel ("Claude Code directly in Hexis")
+      if ((e.metaKey || e.ctrlKey) && e.key === 'j') {
+        e.preventDefault();
+        togglePanel('chat');
+      }
       // Ctrl+T: toggle timeline
       if ((e.metaKey || e.ctrlKey) && e.key === 't') {
         e.preventDefault();
@@ -1418,6 +1525,17 @@ export default function App() {
         }
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          useFileOpsHistoryStore.getState().redo(historyDeps).then((ok) => {
+            if (ok) refreshWorkspace();
+          });
+        }
+      }
+      // Ctrl+Shift+Z: redo (mac/linux standard)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'Z')) {
         const editorFocused = document.activeElement?.closest?.('.cm-editor');
         const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
         if (!editorFocused && !inputFocused) {
@@ -1469,6 +1587,12 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'L' || e.key === 'l')) {
         e.preventDefault();
         hardRefreshLayout();
+      }
+      // Ctrl+Shift+E: toggle embedded explorer sidebar
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
+        e.preventDefault();
+        usePanelStore.getState().showPanel('editor');
+        window.dispatchEvent(new Event('hexis:toggle-explorer'));
       }
     };
     window.addEventListener('keydown', handler);
@@ -1534,15 +1658,29 @@ export default function App() {
       {/* DockContainer takes up the space above the status bar */}
       <div className="flex-1 min-h-0 relative">
         <DockContainer panels={[
-          <DockPanel key="ai" id="ai" title="AI Agents" icon="🐝"><AIPanel /></DockPanel>,
-          <DockPanel key="git" id="git" title="Source Control" icon="⎇"><GitPanel /></DockPanel>,
-          <DockPanel key="search" id="search" title="Search" icon="⌕"><SearchPanel /></DockPanel>,
-          <DockPanel key="bookmarks" id="bookmarks" title="Bookmarks" icon="☆"><BookmarksPanel /></DockPanel>,
-          <DockPanel key="history" id="history" title="Local History" icon="◷"><LocalHistoryPanel /></DockPanel>,
-          <DockPanel key="editor" id="editor" title="Editor"><EditorPanel /></DockPanel>,
-          <DockPanel key="terminal" id="terminal" title="Terminal" icon=">_"><TerminalPanel /></DockPanel>,
-          <DockPanel key="timeline" id="timeline" title="Timeline" icon="◷"><HistoryTimeline onSelectCommit={(hash) => console.log('commit:', hash)} /></DockPanel>,
-          <DockPanel key="taskboard" id="taskboard" title="Tasks" icon="☰"><TaskBoard /></DockPanel>,
+          <DockPanel key="chat" id="chat" title="Chat" icon={<Icon name="comment-discussion" />}><ChatPanel /></DockPanel>,
+          <DockPanel key="ai" id="ai" title="AI Agents" icon={<Icon name="hubot" />}><AIPanel /></DockPanel>,
+          <DockPanel key="git" id="git" title="Source Control" icon={<Icon name="git-branch" />}><GitPanel /></DockPanel>,
+          <DockPanel key="search" id="search" title="Search" icon={<Icon name="search" />}><SearchPanel /></DockPanel>,
+          <DockPanel key="bookmarks" id="bookmarks" title="Bookmarks" icon={<Icon name="bookmark" />}><BookmarksPanel /></DockPanel>,
+          <DockPanel key="history" id="history" title="Local History" icon={<Icon name="history" />}><LocalHistoryPanel /></DockPanel>,
+          <DockPanel key="editor" id="editor" title="Editor" icon={<Icon name="file-code" />}>
+            <EditorPanel
+              explorer={
+                <FileTreePanel
+                  files={enrichedFiles}
+                  groups={groups}
+                  onContextMenu={handleCellContextMenu}
+                  hexCanvasRef={hexCanvasRef}
+                  onCellDrop={handleCellDrop}
+                  onHexAction={handleHexContextAction}
+                />
+              }
+            />
+          </DockPanel>,
+          <DockPanel key="terminal" id="terminal" title="Terminal" icon={<Icon name="terminal" />}><TerminalPanel /></DockPanel>,
+          <DockPanel key="timeline" id="timeline" title="Timeline" icon={<Icon name="git-commit" />}><HistoryTimeline onSelectCommit={(hash) => console.log('commit:', hash)} /></DockPanel>,
+          <DockPanel key="taskboard" id="taskboard" title="Tasks" icon={<Icon name="checklist" />}><TaskBoard /></DockPanel>,
         ]}>
           <HexCanvas
             ref={hexCanvasRef}

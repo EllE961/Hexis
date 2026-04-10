@@ -66,6 +66,25 @@ export const PROFILES = {
     maxTurns: 15,
   },
 
+  // ─── Chat mode ───
+  // Direct conversational agent — no pipeline, just `runAgent` with resume.
+  // Same models / tools / hooks as the Coder, but driven turn-by-turn from
+  // the Chat panel instead of a one-shot task. This is the "Claude Code
+  // directly, inside Hexis" mode.
+  chat: {
+    model: 'sonnet',
+    effort: 'high',
+    maxTurns: 40,                   // enough for a single turn's tool chain
+    fallbackModel: 'sonnet',
+  },
+  chat_opus: {
+    model: 'opus',
+    effort: 'high',
+    maxTurns: 40,
+    thinking: { type: 'adaptive' },
+    fallbackModel: 'sonnet',
+  },
+
   // ─── Deep Research pipeline roles ───
   // Tuned from a real 14-minute end-to-end test that produced a 100-line
   // report with 14 citations and 5 adversarial findings. Target: 8 minutes.

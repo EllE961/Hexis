@@ -239,6 +239,43 @@ export class Viewport {
     this._beginAnim(wx, wy, inflated, duration);
   }
 
+  /**
+   * Zoom toward a world point while keeping it anchored under a fixed
+   * screen position. Unlike `centerOnWithOvershoot` (which centers the
+   * target), this is the VS-Code / Google-Maps "zoom to cursor" behavior:
+   * the hex the user double-clicked stays exactly under their mouse as the
+   * camera zooms in around it.
+   *
+   * Math: after zoom, we want screen point (anchorSx, anchorSy) to show
+   * world point (wx, wy). From `screen = (world - cam) * zoom + size/2`:
+   *   camX = wx - (anchorSx - width/2) / targetZoom
+   *   camY = wy - (anchorSy - height/2) / targetZoom
+   *
+   * @param {number} wx            world-space x of the target (cell center)
+   * @param {number} wy            world-space y of the target
+   * @param {number} zoom          final zoom level
+   * @param {number} anchorSx      canvas-local screen x where wx/wy should end up
+   * @param {number} anchorSy      canvas-local screen y where wx/wy should end up
+   */
+  zoomToAnchored(wx, wy, zoom, anchorSx, anchorSy) {
+    const clamped = Math.max(this.minZoom, Math.min(this.maxZoom, zoom));
+    const isZoomingIn = clamped > this.zoom;
+    const inflated = isZoomingIn
+      ? Math.min(this.maxZoom, clamped * 1.04)
+      : Math.max(this.minZoom, clamped * 0.97);
+
+    // Camera position that keeps (wx, wy) under the anchor screen point at
+    // the FINAL (non-inflated) zoom. We use the final zoom for anchor math
+    // so the world point lands exactly under the cursor after settle.
+    const targetCamX = wx - (anchorSx - this.width / 2) / clamped;
+    const targetCamY = wy - (anchorSy - this.height / 2) / clamped;
+
+    const duration = this._pickDuration(targetCamX, targetCamY, inflated);
+    this._overshootPhase = 'out';
+    this._overshootSettleZoom = clamped;
+    this._beginAnim(targetCamX, targetCamY, inflated, duration);
+  }
+
   /** Fit all points in view with padding — SNAPS immediately (no animation). */
   fitBounds(minX, minY, maxX, maxY, padding = 120) {
     this.tx = (minX + maxX) / 2;

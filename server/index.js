@@ -16,7 +16,7 @@ import {
   amendCommit, revertCommit, resetTo, fetchRemote,
 } from './git-analyzer.js';
 import { startWatcher } from './watcher.js';
-import { startTask, cancelTask, approveTask, writeTask, resumeTaskFn, researchTask } from './agent-orchestrator.js';
+import { startTask, cancelTask, approveTask, writeTask, resumeTaskFn, researchTask, chatMessage, cancelChat, disposeChat } from './agent-orchestrator.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { initStateStore, getStateStore } from './state-store.js';
 import { initRepoContext } from './repo-context.js';
@@ -685,6 +685,41 @@ app.post('/api/research/start', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Chat mode — direct conversational agent, no pipeline
+// Body: { chatId, message, sessionId?, model? }
+// Returns { ok, sessionId, text, tokens, cost } once the turn completes.
+// Events also stream via SSE (chat_turn_started, agent_stream,
+// chat_turn_complete, chat_turn_failed) so the UI can render tokens live.
+app.post('/api/chat/message', async (req, res) => {
+  const { chatId, message, sessionId, model } = req.body || {};
+  if (!chatId || !message) return res.status(400).json({ error: 'chatId and message required' });
+  try {
+    const result = await chatMessage(chatId, message, REPO_PATH, broadcast, {
+      sessionId: sessionId || null,
+      model: model || 'sonnet',
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// Cancel an in-flight chat turn.
+app.post('/api/chat/cancel', (req, res) => {
+  const { chatId } = req.body || {};
+  if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  cancelChat(chatId);
+  res.json({ ok: true });
+});
+
+// Dispose a chat's server-side state (UI is closing it).
+app.post('/api/chat/dispose', (req, res) => {
+  const { chatId } = req.body || {};
+  if (!chatId) return res.status(400).json({ error: 'chatId required' });
+  disposeChat(chatId);
+  res.json({ ok: true });
 });
 
 app.post('/api/agent/approve', (req, res) => {

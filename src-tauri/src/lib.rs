@@ -133,6 +133,12 @@ fn write_file(path: String, content: String, state: State<AppState>) -> Result<(
         return Err("Path outside project".to_string());
     }
 
+    // Ensure parent directory exists so callers can write to nested
+    // paths like `.hexis/layout.json` without a separate mkdir step.
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
     std::fs::write(&full_path, content).map_err(|e| e.to_string())
 }
 

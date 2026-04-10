@@ -8,6 +8,9 @@ import {
   getVisibleHexRange,
   isHexVisible,
   pointInHex,
+  hexCellCount,
+  cellsAtDistance,
+  getHexDisk,
 } from './hexMath.js';
 
 const SQRT3 = Math.sqrt(3);
@@ -165,5 +168,88 @@ describe('pointInHex', () => {
   it('returns false beyond the half-height boundary', () => {
     // dy > size * SQRT3/2 → AABB reject
     expect(pointInHex(0, SIZE * SQRT3 / 2 + 1, 0, 0, SIZE)).toBe(false);
+  });
+});
+
+// ─── hexCellCount ─────────────────────────────────────────────────────────────
+
+describe('hexCellCount', () => {
+  it('ring 0 → 1 cell', () => {
+    expect(hexCellCount(0)).toBe(1);
+  });
+
+  it('follows 3r² + 3r + 1 for rings 1-5', () => {
+    expect(hexCellCount(1)).toBe(7);
+    expect(hexCellCount(2)).toBe(19);
+    expect(hexCellCount(3)).toBe(37);
+    expect(hexCellCount(4)).toBe(61);
+    expect(hexCellCount(5)).toBe(91);
+  });
+});
+
+// ─── cellsAtDistance ──────────────────────────────────────────────────────────
+
+describe('cellsAtDistance', () => {
+  it('distance 0 → exactly one cell at origin', () => {
+    const cells = cellsAtDistance(0, 0, 0);
+    expect(cells).toHaveLength(1);
+    expect(cells[0]).toEqual({ q: 0, r: 0 });
+  });
+
+  it('distance d → exactly 6d cells for d = 1..5', () => {
+    for (let d = 1; d <= 5; d++) {
+      expect(cellsAtDistance(0, 0, d)).toHaveLength(6 * d);
+    }
+  });
+
+  it('every returned cell is at exactly distance d', () => {
+    for (let d = 1; d <= 4; d++) {
+      for (const c of cellsAtDistance(0, 0, d)) {
+        expect(hexDistance(0, 0, c.q, c.r)).toBe(d);
+      }
+    }
+  });
+
+  it('works with non-origin centers', () => {
+    const cells = cellsAtDistance(5, 3, 2);
+    expect(cells).toHaveLength(12);
+    for (const c of cells) {
+      expect(hexDistance(5, 3, c.q, c.r)).toBe(2);
+    }
+  });
+
+  it('produces no duplicates', () => {
+    const cells = cellsAtDistance(0, 0, 3);
+    const keys = new Set(cells.map(c => `${c.q},${c.r}`));
+    expect(keys.size).toBe(cells.length);
+  });
+});
+
+// ─── getHexDisk ───────────────────────────────────────────────────────────────
+
+describe('getHexDisk', () => {
+  it('ring 0 → just the center cell', () => {
+    expect(getHexDisk(0, 0, 0)).toHaveLength(1);
+  });
+
+  it('produces hexCellCount(r) cells for ring r', () => {
+    for (let r = 0; r <= 5; r++) {
+      expect(getHexDisk(0, 0, r)).toHaveLength(hexCellCount(r));
+    }
+  });
+
+  it('every cell has distance ≤ r from center', () => {
+    for (const c of getHexDisk(0, 0, 3)) {
+      expect(hexDistance(0, 0, c.q, c.r)).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it('contains all cells from cellsAtDistance(0..r)', () => {
+    const disk = new Set(getHexDisk(0, 0, 2).map(c => `${c.q},${c.r}`));
+    for (let d = 0; d <= 2; d++) {
+      for (const c of cellsAtDistance(0, 0, d)) {
+        expect(disk.has(`${c.q},${c.r}`)).toBe(true);
+      }
+    }
   });
 });

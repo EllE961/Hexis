@@ -87,11 +87,57 @@ app.put('/api/file', async (req, res) => {
   if (!filePath || content == null) return res.status(400).json({ error: 'path and content required' });
   if (!isPathSafe(filePath)) return res.status(403).json({ error: 'path outside repo' });
   try {
+    const { mkdir } = await import('fs/promises');
     const fullPath = resolve(REPO_PATH, filePath);
+    const parent = resolve(fullPath, '..');
+    await mkdir(parent, { recursive: true });
     await writeFile(fullPath, content, 'utf-8');
     res.json({ ok: true, path: filePath });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Layout state persistence ───
+// Dedicated endpoint for .hexis/layout.json. Returns 200 with `state: null`
+// when the file doesn't exist yet (first run) so the client doesn't spam
+// the console with 404s on a harmless missing-file case.
+
+const LAYOUT_STATE_PATH = '.hexis/layout.json';
+
+app.get('/api/layout-state', async (_req, res) => {
+  try {
+    const { readFile } = await import('fs/promises');
+    const fullPath = resolve(REPO_PATH, LAYOUT_STATE_PATH);
+    const content = await readFile(fullPath, 'utf-8');
+    res.json({ state: JSON.parse(content) });
+  } catch {
+    // Missing or unreadable — not an error, just no state yet
+    res.json({ state: null });
+  }
+});
+
+app.put('/api/layout-state', async (req, res) => {
+  try {
+    const { mkdir } = await import('fs/promises');
+    const fullPath = resolve(REPO_PATH, LAYOUT_STATE_PATH);
+    const parent = resolve(fullPath, '..');
+    await mkdir(parent, { recursive: true });
+    await writeFile(fullPath, JSON.stringify(req.body, null, 2), 'utf-8');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/layout-state', async (_req, res) => {
+  try {
+    const { unlink } = await import('fs/promises');
+    await unlink(resolve(REPO_PATH, LAYOUT_STATE_PATH));
+    res.json({ ok: true });
+  } catch {
+    // Already gone — fine
+    res.json({ ok: true });
   }
 });
 

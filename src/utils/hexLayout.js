@@ -1,180 +1,396 @@
 /**
- * Hexis Layout — perfect hex-in-hex grid snapping.
+ * Hexis layout engine — ground-up rewrite.
  *
- * Everything on ONE hex grid. Folders are perfect hex shapes (rings of cells).
- * Files are individual cells inside their folder hex.
+ * INVARIANTS (enforced by construction):
+ *   1. Every coordinate is an odd-q offset hex cell via `hexMath.js`
+ *   2. Files = 1 cell; groups = a perfect hex of ring ≥ 1 (always-hex rule)
+ *   3. Every group has ≥ 1 empty cell (drag-drop landing zone)
+ *   4. Sub-groups are fully contained inside their parent hex
+ *   5. Infinite nesting, no depth limit
+ *   6. Auto-grow on tree changes: ring++ until packing succeeds
+ *   7. Cascading — a child's grow may force parent to re-pack + grow
  *
- * Hex ring sizes (perfect hexagonal numbers):
- *   ring 0: 1 cell      ring 1: 7 cells     ring 2: 19 cells
- *   ring 3: 37 cells    ring 4: 61 cells    ring 5: 91 cells
+ * PIPELINE (four stages):
+ *   Stage 1: buildForest     — flat → tree of Boxes, depth-annotated
+ *   Stage 2: sizeOnlyPass    — bottom-up ring sizing via tryPack feasibility
+ *   Stage 3: placeForest     — top-down absolute placement (BFS for top-level,
+ *                              tryPack at real center for descendants)
+ *   Stage 4: projectToOutput — group regions, cells, occupancy, cellOwner,
+ *                              label positions (same shape as prior engine)
  *
- * Formula: cells_in_ring(n) = 3n² + 3n + 1
+ * The layout is deterministic: same (files, groups) → same output. An optional
+ * `savedState` argument lets callers preserve positions across incremental
+ * tree changes for visual stability; the hard-refresh command in App.jsx
+ * clears it to force a ground-up repack.
  */
 
-import { hexToPixel, hexNeighbors, hexDistance } from './hexMath.js';
+import {
+  hexToPixel,
+  hexDistance,
+  cellsAtDistance,
+  getHexDisk,
+  hexCellCount,
+} from './hexMath.js';
 
 const HEX_SIZE = 30;
+const MAX_RING = 12;
+const SQRT3 = Math.sqrt(3);
 
-/** How many cells in a perfect hex of ring radius n. */
-function hexCellCount(n) { return 3 * n * n + 3 * n + 1; }
+// ─── Stage 1: Build forest ────────────────────────────────────────────────────
 
-/** Find minimum ring that fits N cells. */
-function ringForCount(n) {
-  if (n <= 1) return 0;
-  for (let r = 1; r <= 10; r++) {
-    if (hexCellCount(r) >= n) return r;
+function buildForest(files, groups) {
+  const byPath = new Map();
+  const root = {
+    kind: 'group',
+    path: '.',
+    name: '.',
+    children: [],
+    directFiles: [],
+    ring: 0,
+    depth: -1, // world root not rendered
+    cq: 0,
+    cr: 0,
+  };
+  byPath.set('.', root);
+
+  for (const g of groups) {
+    if (g.path === '.') continue;
+    byPath.set(g.path, {
+      kind: 'group',
+      path: g.path,
+      name: g.name || g.path.split('/').pop() || g.path,
+      children: [],
+      directFiles: [],
+      ring: 1,
+      depth: 0,
+      cq: 0,
+      cr: 0,
+    });
   }
-  return 10;
+  for (const g of groups) {
+    if (g.path === '.') continue;
+    const node = byPath.get(g.path);
+    if (!node) continue;
+    const parent = byPath.get(g.parent_path || '.') || root;
+    parent.children.push(node);
+  }
+  for (const f of files) {
+    const parent = byPath.get(f.group_path || '.') || root;
+    parent.directFiles.push(f);
+  }
+
+  function setDepth(box, depth) {
+    if (box.path !== '.') box.depth = depth;
+    const childDepth = box.path === '.' ? 0 : depth + 1;
+    for (const c of box.children) setDepth(c, childDepth);
+  }
+  setDepth(root, 0);
+  return root;
 }
+
+// ─── Stage 2: Size (post-order) ───────────────────────────────────────────────
 
 /**
- * Ring size for a GROUP. Guaranteed minimum ring-1 (= 7 cells) so every
- * group always renders as a full hex, even if it contains 0 or 1 files.
- * This is the key to the "always-hex" look: a group with 1 file shows
- * 1 filled cell + 6 empty placeholder cells, and an empty group still
- * shows 7 empty cells with its label.
+ * Bottom-up sizing: computes box.ring for every group. Uses tryPack at
+ * virtual center (0, 0) as a feasibility proxy. The real tryPack at the
+ * actual parent center in Stage 3 may need to grow the ring further due
+ * to greedy-ordering parity quirks — that's handled top-down.
  */
-function ringForGroup(n) {
-  const r = ringForCount(n);
-  return r < 1 ? 1 : r;
-}
+function sizeOnlyPass(box) {
+  if (box.kind !== 'group') return;
 
-/** Get all cells in a perfect hex ring of radius `ring` centered at (cq, cr). */
-function getHexRingCells(cq, cr, ring) {
-  const cells = [];
-  for (let q = cq - ring * 2; q <= cq + ring * 2; q++) {
-    for (let r = cr - ring * 2; r <= cr + ring * 2; r++) {
-      if (hexDistance(cq, cr, q, r) <= ring) {
-        cells.push({ q, r });
-      }
+  for (const child of box.children) sizeOnlyPass(child);
+
+  if (box.path === '.') return; // world root has no ring
+
+  if (box.children.length === 0 && box.directFiles.length === 0) {
+    box.ring = 1; // always-hex floor
+    return;
+  }
+
+  const directCount = box.directFiles.length;
+  const maxChildRing = box.children.length > 0
+    ? Math.max(...box.children.map(c => c.ring))
+    : 0;
+  let ring = Math.max(1, maxChildRing + 1);
+
+  const requiredCells = directCount
+    + box.children.reduce((s, c) => s + hexCellCount(c.ring), 0)
+    + 1; // +1 guaranteed empty slot
+  while (hexCellCount(ring) < requiredCells) ring++;
+
+  while (!tryPack(box, 0, 0, ring, null)) {
+    ring++;
+    if (ring > MAX_RING) {
+      throw new Error(`hex layout: ring > ${MAX_RING} at ${box.path}`);
     }
   }
-  return cells;
+  box.ring = ring;
+}
+
+// ─── tryPack: feasibility test + position writer ─────────────────────────────
+
+/**
+ * Attempt to place all `box.children` inside a hex of ring R centered at
+ * (cq, cr). Writes successful positions into `child.cq, child.cr`.
+ * Returns true on success, false if caller should grow R and retry.
+ *
+ * Strategy:
+ *   • Sort children by ring descending (biggest first — most constrained)
+ *   • Honour `savedHints.get(path)` if the hint is still valid
+ *   • Else spiral INWARD from the parent's rim (farthest-from-center
+ *     first). This yields two wins:
+ *       1. Packing feasibility: center-first greedy fails for some
+ *          feasible configs because sibling non-overlap requires distance
+ *          ≥ r_a + r_b + 1 > containment distance from center. Outside-in
+ *          finds those configs.
+ *       2. Visual: sub-groups ring around the edge, leaving the parent's
+ *          center free for its direct files. Matches the honeycomb aesthetic.
+ *   • Non-overlap test: hexDistance(c_a, c_b) ≥ r_a + r_b + 1  (O(1))
+ *   • Verify `freeCells ≥ directFiles + 1` after children occupy theirs
+ */
+function tryPack(box, cq, cr, R, savedHints) {
+  const children = [...box.children].sort((a, b) => b.ring - a.ring);
+  const placed = [];
+
+  for (const child of children) {
+    const maxDist = R - child.ring;
+    if (maxDist < 0) return false;
+
+    let chosen = null;
+
+    if (savedHints) {
+      const hint = savedHints.get(child.path);
+      if (hint) {
+        const [hq, hr] = hint;
+        if (hexDistance(cq, cr, hq, hr) <= maxDist) {
+          let ok = true;
+          for (const p of placed) {
+            if (hexDistance(hq, hr, p.cq, p.cr) < child.ring + p.ring + 1) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) chosen = { q: hq, r: hr };
+        }
+      }
+    }
+
+    if (!chosen) {
+      // Outside-in spiral: iterate from maxDist down to 0
+      for (let d = maxDist; d >= 0 && !chosen; d--) {
+        const ring = cellsAtDistance(cq, cr, d);
+        for (const c of ring) {
+          let ok = true;
+          for (const p of placed) {
+            if (hexDistance(c.q, c.r, p.cq, p.cr) < child.ring + p.ring + 1) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) {
+            chosen = c;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!chosen) return false;
+    child.cq = chosen.q;
+    child.cr = chosen.r;
+    placed.push({ cq: chosen.q, cr: chosen.r, ring: child.ring });
+  }
+
+  // Verify ≥1 empty slot after children occupy their cells
+  const occupied = new Set();
+  for (const p of placed) {
+    for (const cell of getHexDisk(p.cq, p.cr, p.ring)) {
+      occupied.add(`${cell.q},${cell.r}`);
+    }
+  }
+  return hexCellCount(R) - occupied.size >= box.directFiles.length + 1;
+}
+
+// ─── Stage 3: Place (top-down) ────────────────────────────────────────────────
+
+function placeForest(root, savedHints) {
+  placeTopLevel(root.children, savedHints);
+  for (const top of root.children) {
+    placeSubtree(top, savedHints);
+  }
 }
 
 /**
- * Compute layout.
+ * Top-level groups have no containing hex — they're placed on the infinite
+ * plane via BFS from origin. Saved anchors are honoured when possible.
  */
-export function computeLayout(files, groups, hexSize = HEX_SIZE) {
+function placeTopLevel(topGroups, savedHints) {
+  const sorted = [...topGroups].sort((a, b) => b.ring - a.ring);
+  const placed = [];
+
+  for (const group of sorted) {
+    let chosen = null;
+
+    if (savedHints) {
+      const hint = savedHints.get(group.path);
+      if (hint) {
+        const [hq, hr] = hint;
+        let ok = true;
+        for (const p of placed) {
+          if (hexDistance(hq, hr, p.cq, p.cr) < group.ring + p.ring + 1) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) chosen = { q: hq, r: hr };
+      }
+    }
+
+    if (!chosen) {
+      // BFS outward from origin — cap distance to prevent runaway
+      const MAX_D = 80;
+      for (let d = 0; d <= MAX_D && !chosen; d++) {
+        const candidates = cellsAtDistance(0, 0, d);
+        for (const c of candidates) {
+          let ok = true;
+          for (const p of placed) {
+            if (hexDistance(c.q, c.r, p.cq, p.cr) < group.ring + p.ring + 1) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) {
+            chosen = c;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!chosen) chosen = { q: 0, r: 0 };
+    group.cq = chosen.q;
+    group.cr = chosen.r;
+    placed.push({ cq: chosen.q, cr: chosen.r, ring: group.ring });
+  }
+}
+
+/**
+ * Recursively place `box`'s descendants. Assumes box.cq/cr already set.
+ * Re-runs tryPack at the real center — may grow the ring beyond the
+ * sizeOnlyPass estimate if greedy ordering at offset parity differs.
+ */
+function placeSubtree(box, savedHints) {
+  if (box.children.length === 0 && box.directFiles.length === 0) return;
+
+  let ring = box.ring;
+  while (!tryPack(box, box.cq, box.cr, ring, savedHints)) {
+    ring++;
+    if (ring > MAX_RING) {
+      throw new Error(`hex layout: ring > ${MAX_RING} at ${box.path}`);
+    }
+  }
+  box.ring = ring;
+
+  for (const child of box.children) {
+    placeSubtree(child, savedHints);
+  }
+}
+
+// ─── Stage 4: Project to output maps ──────────────────────────────────────────
+
+function countAllFiles(box) {
+  let n = box.directFiles.length;
+  for (const c of box.children) n += countAllFiles(c);
+  return n;
+}
+
+function projectToOutput(root, hexSize) {
   const cells = new Map();
   const folders = new Map();
   const groupRegions = new Map();
   const occupancy = new Map();
 
-  // Build tree
-  const filesByGroup = new Map();
-  for (const file of files) {
-    const gp = file.group_path || '.';
-    if (!filesByGroup.has(gp)) filesByGroup.set(gp, []);
-    filesByGroup.get(gp).push(file);
-  }
+  // Reserved cells per region (for later cellOwner depth-priority walk)
+  const usedGridCells = new Set();
 
-  const childGroupsOf = new Map();
-  for (const g of groups) {
-    if (g.parent_path && g.parent_path !== '.') {
-      if (!childGroupsOf.has(g.parent_path)) childGroupsOf.set(g.parent_path, []);
-      childGroupsOf.get(g.parent_path).push(g);
+  function projectGroup(box) {
+    const regionCells = getHexDisk(box.cq, box.cr, box.ring);
+    groupRegions.set(box.path, regionCells);
+    for (const c of regionCells) usedGridCells.add(`${c.q},${c.r}`);
+
+    const centerPx = hexToPixel(box.cq, box.cr, hexSize);
+    const topY = centerPx.y - box.ring * hexSize * SQRT3 * 1.06;
+
+    folders.set(box.path, {
+      x: centerPx.x,
+      y: centerPx.y,
+      radius: box.ring * hexSize * 1.8,
+      labelX: centerPx.x,
+      // GroupRenderer subtracts another HEX_SIZE * 0.7 when drawing,
+      // giving a total offset above the top cell.
+      labelY: topY,
+      labelRect: null,
+      name: box.name,
+      depth: box.depth,
+      ring: box.ring,
+      cq: box.cq,
+      cr: box.cr,
+      fileCount: box.directFiles.length,
+      childCount: box.children.length,
+      totalFiles: countAllFiles(box),
+      path: box.path,
+      cellCount: regionCells.length,
+    });
+
+    // Cells NOT occupied by children become candidates for direct files
+    const childCellSet = new Set();
+    for (const child of box.children) {
+      for (const cell of getHexDisk(child.cq, child.cr, child.ring)) {
+        childCellSet.add(`${cell.q},${cell.r}`);
+      }
     }
-  }
+    const freeCells = regionCells
+      .filter(c => !childCellSet.has(`${c.q},${c.r}`))
+      .sort((a, b) => {
+        const da = hexDistance(box.cq, box.cr, a.q, a.r);
+        const db = hexDistance(box.cq, box.cr, b.q, b.r);
+        return da - db; // center-outward
+      });
 
-  // Root '.' is NOT a group — it's the workspace itself. Files directly at
-  // root render as standalone cells next to the real folder clusters, not
-  // wrapped in a pseudo-group hex ring. So topGroups excludes '.'.
-  const topGroups = groups.filter(g => g.path !== '.' && (!g.parent_path || g.parent_path === '.'));
+    const sortedFiles = [...box.directFiles].sort(
+      (a, b) => (b.is_landmark ? 1 : 0) - (a.is_landmark ? 1 : 0)
+    );
 
-  // Count all files recursively
-  function countAll(gp) {
-    let count = (filesByGroup.get(gp) || []).length;
-    for (const child of (childGroupsOf.get(gp) || [])) count += countAll(child.path);
-    return count;
-  }
-
-  // Sort biggest first
-  topGroups.sort((a, b) => countAll(b.path) - countAll(a.path));
-
-  // Global grid occupancy
-  const gridUsed = new Set();
-
-  // Place each top-level group as a perfect hex shape on a meta-grid
-  // Meta-grid: folder centers placed on a hex grid with spacing based on ring size
-  const folderPlacements = []; // [{ path, ring, cq, cr }]
-
-  // Calculate cells needed including sub-folder ring overhead + slack.
-  // Slack ensures every group has at least 2–3 empty cells for immediate
-  // drops without needing to regrow the ring on every drag-drop op.
-  function cellsNeeded(gp) {
-    const directFiles = (filesByGroup.get(gp) || []).length;
-    const children = childGroupsOf.get(gp) || [];
-    let total = directFiles;
-    for (const child of children) {
-      const childFiles = countAll(child.path);
-      // Sub-folder always needs its complete ring — even if 0 files,
-      // a child group still renders at min ring-1 (7 cells).
-      const childRing = ringForGroup(childFiles);
-      total += hexCellCount(childRing);
-    }
-    // Minimal padding for packing slack
-    if (children.length > 0) total = Math.ceil(total * 1.08);
-    // Breathing room for drag-drop: at least 1 extra cell, more for bigger groups
-    total += Math.max(1, Math.ceil(total * 0.15));
-    return total;
-  }
-
-  for (const group of topGroups) {
-    // Empty groups (zero files, zero child groups with files) still render
-    // as a ring-1 hex with a label — that's the "always-hex" requirement.
-    // Use cellsNeeded which accounts for sub-folder ring overhead + slack
-    const neededCells = cellsNeeded(group.path);
-    const ring = ringForGroup(neededCells);
-
-    // Find placement: first folder at origin, rest adjacent
-    let cq, cr;
-    if (folderPlacements.length === 0) {
-      cq = 0; cr = 0;
-    } else {
-      // Find a position adjacent to existing folders where this hex fits
-      const pos = findAdjacentPlacement(ring, folderPlacements, gridUsed);
-      cq = pos.q; cr = pos.r;
+    // Place files center-outward, skipping cells that still have free slot
+    // reserved as the empty landing zone (last cell).
+    for (let i = 0; i < sortedFiles.length && i < freeCells.length; i++) {
+      const file = sortedFiles[i];
+      const cell = freeCells[i];
+      const px = hexToPixel(cell.q, cell.r, hexSize);
+      cells.set(file.path, {
+        q: cell.q,
+        r: cell.r,
+        x: px.x,
+        y: px.y,
+        parentFolder: box.path,
+      });
+      occupancy.set(`${cell.q},${cell.r}`, file.path);
     }
 
-    // Claim cells
-    const hexCells = getHexRingCells(cq, cr, ring);
-    for (const c of hexCells) gridUsed.add(`${c.q},${c.r}`);
-
-    folderPlacements.push({ path: group.path, ring, cq, cr });
-
-    // Place files inside this hex shape
-    placeFilesInHex(group.path, group.name || group.path, cq, cr, ring, hexCells, 0,
-      filesByGroup, childGroupsOf, cells, folders, groupRegions, occupancy, hexSize);
+    for (const child of box.children) projectGroup(child);
   }
 
-  // ── Root files: place as standalone cells, NOT as a group ──
-  // Root files are not "inside" anything. They cluster adjacent to the
-  // existing folder regions via BFS, but they don't get a folder entry,
-  // a groupRegion, or a border — they are just loose nodes on the grid.
-  const rootFiles = filesByGroup.get('.') || [];
-  if (rootFiles.length > 0) {
-    placeRootFilesAsCluster(rootFiles, gridUsed, cells, occupancy, hexSize);
-  }
+  for (const top of root.children) projectGroup(top);
 
-  // ── Build cellOwner map — O(1) hit testing for files AND empty slots ──
-  // For every cell in a groupRegion, either it has a file (occupancy hit)
-  // → cellOwner entry with kind='file', or it's an empty slot → kind='empty'.
-  // Root files get cellOwner entries too so hit testing is uniform.
-  //
-  // For empty slots that lie inside MULTIPLE nested groups, the DEEPEST
-  // group wins (innermost wins) so drag-and-drop targets the tightest
-  // container. We sort regions by depth (deepest first) and let later
-  // writes overwrite earlier ones only when deeper.
+  // Root-level standalone files
+  placeRootFiles(root.directFiles, usedGridCells, cells, occupancy, hexSize);
+
+  // Build cellOwner: files win; empty slots assigned to deepest owning group
   const cellOwner = new Map();
-
-  // First pass: every file cell is a file entry
   for (const [key, filePath] of occupancy) {
     cellOwner.set(key, { kind: 'file', filePath });
   }
-
-  // Second pass: fill empty slots with their deepest owning group.
-  // Iterate regions from shallowest to deepest so deeper wins via overwrite.
   const sortedRegions = [...groupRegions.entries()].sort((a, b) => {
     const da = folders.get(a[0])?.depth ?? 0;
     const db = folders.get(b[0])?.depth ?? 0;
@@ -184,368 +400,167 @@ export function computeLayout(files, groups, hexSize = HEX_SIZE) {
     for (const c of regionCells) {
       const key = `${c.q},${c.r}`;
       const existing = cellOwner.get(key);
-      if (existing?.kind === 'file') continue; // file wins over empty
-      // Overwrite shallower empty with deeper empty
+      if (existing?.kind === 'file') continue;
       cellOwner.set(key, { kind: 'empty', groupPath, q: c.q, r: c.r });
     }
   }
 
+  // Label collision resolution (shift overlapping labels vertically)
+  layoutLabels(folders, hexSize);
+
   return { cells, folders, groupRegions, occupancy, cellOwner };
 }
 
-/**
- * Place root-level files as individual cells adjacent to existing folder
- * clusters. BFS outward from a seed on the boundary of already-used cells,
- * filling the nearest free cells. Landmark files (README, etc) go first.
- */
-function placeRootFilesAsCluster(rootFiles, gridUsed, cells, occupancy, hexSize) {
-  const sortedFiles = [...rootFiles].sort((a, b) =>
-    (b.is_landmark ? 1 : 0) - (a.is_landmark ? 1 : 0));
+function placeRootFiles(rootFiles, usedGridCells, cells, occupancy, hexSize) {
+  if (!rootFiles || rootFiles.length === 0) return;
 
-  // Seed: closest free boundary cell to origin, or origin itself if nothing placed.
+  const sorted = [...rootFiles].sort(
+    (a, b) => (b.is_landmark ? 1 : 0) - (a.is_landmark ? 1 : 0)
+  );
+
+  // Seed: find the nearest cell to origin that isn't inside any group
   let seed = null;
-  if (gridUsed.size === 0) {
-    seed = { q: 0, r: 0 };
-  } else {
-    let bestDist = Infinity;
-    for (const key of gridUsed) {
-      const [q, r] = key.split(',').map(Number);
-      for (const n of hexNeighbors(q, r)) {
-        const nk = `${n.q},${n.r}`;
-        if (gridUsed.has(nk)) continue;
-        const d = Math.abs(n.q) + Math.abs(n.r) + Math.abs(n.q + n.r);
-        if (d < bestDist) { bestDist = d; seed = n; }
+  for (let d = 0; d < 100; d++) {
+    const ring = cellsAtDistance(0, 0, d);
+    for (const c of ring) {
+      if (!usedGridCells.has(`${c.q},${c.r}`)) {
+        seed = c;
+        break;
       }
     }
-    if (!seed) seed = { q: 0, r: 0 };
+    if (seed) break;
   }
+  if (!seed) seed = { q: 0, r: 0 };
 
-  // BFS outward from seed, placing files into the first N free cells.
+  // BFS outward from seed, filling cells with files
   const queue = [seed];
   const visited = new Set([`${seed.q},${seed.r}`]);
-  let placed = 0;
+  let index = 0;
 
-  while (queue.length > 0 && placed < sortedFiles.length) {
-    const cur = queue.shift();
-    const key = `${cur.q},${cur.r}`;
-
-    if (!gridUsed.has(key)) {
-      const file = sortedFiles[placed++];
-      gridUsed.add(key);
-      const pos = hexToPixel(cur.q, cur.r, hexSize);
+  while (queue.length > 0 && index < sorted.length) {
+    const cell = queue.shift();
+    const key = `${cell.q},${cell.r}`;
+    if (!usedGridCells.has(key) && !occupancy.has(key)) {
+      const file = sorted[index++];
+      const px = hexToPixel(cell.q, cell.r, hexSize);
       cells.set(file.path, {
-        q: cur.q, r: cur.r,
-        x: pos.x, y: pos.y,
-        parentFolder: null, // explicitly ungrouped
+        q: cell.q,
+        r: cell.r,
+        x: px.x,
+        y: px.y,
+        parentFolder: null,
       });
       occupancy.set(key, file.path);
     }
-
-    for (const n of hexNeighbors(cur.q, cur.r)) {
-      const nk = `${n.q},${n.r}`;
-      if (!visited.has(nk)) {
-        visited.add(nk);
+    for (const n of cellsAtDistance(cell.q, cell.r, 1)) {
+      const nKey = `${n.q},${n.r}`;
+      if (!visited.has(nKey)) {
+        visited.add(nKey);
         queue.push(n);
       }
     }
   }
 }
 
-/**
- * Find a grid position where a hex of given ring fits, directly adjacent to existing groups.
- * BFS from the boundary of all placed cells to find a center where the ring fits without overlap
- * and is touching at least one existing cell.
- */
-function findAdjacentPlacement(ring, existing, gridUsed) {
-  // Collect all boundary cells (cells adjacent to gridUsed but not in gridUsed)
-  const boundary = new Set();
-  for (const key of gridUsed) {
-    const [q, r] = key.split(',').map(Number);
-    for (const n of hexNeighbors(q, r)) {
-      const nk = `${n.q},${n.r}`;
-      if (!gridUsed.has(nk)) boundary.add(nk);
+// ─── Label collision resolution ───────────────────────────────────────────────
+
+function layoutLabels(folders, hexSize) {
+  const sorted = [...folders.values()].sort((a, b) => a.depth - b.depth);
+  const placed = []; // rect list for overlap testing
+
+  const overlaps = (a, b) =>
+    a.x < b.x + b.w &&
+    a.x + a.w > b.x &&
+    a.y < b.y + b.h &&
+    a.y + a.h > b.y;
+
+  for (const folder of sorted) {
+    const fontSize = folder.depth === 0 ? 15 : folder.depth === 1 ? 11 : 9;
+    const plateH = folder.depth === 0 ? 26 : folder.depth === 1 ? 20 : 14;
+    const nameW = (folder.name?.length || 1) * fontSize * 0.6;
+    const countStr = folder.depth < 2 && folder.totalFiles > 0 ? String(folder.totalFiles) : '';
+    const countW = countStr ? countStr.length * fontSize * 0.55 + 8 : 0;
+    const totalW = nameW + countW + 24;
+
+    let lx = folder.labelX;
+    let ly = folder.labelY;
+    const rectAt = (x, y) => ({
+      x: x - totalW / 2,
+      y: y - hexSize * 0.7 - plateH / 2,
+      w: totalW,
+      h: plateH,
+    });
+
+    let r = rectAt(lx, ly);
+    let attempts = 0;
+    while (placed.some(p => overlaps(r, p)) && attempts < 8) {
+      attempts++;
+      ly -= plateH + 4; // shift upward
+      r = rectAt(lx, ly);
     }
-  }
-
-  // For each boundary cell, check if centering a ring hex there fits
-  // We need the ring center to be at distance `ring` from the boundary
-  // So try cells at distance `ring` outward from each boundary cell
-  const tested = new Set();
-  let bestQ = 0, bestR = 0, bestScore = -Infinity;
-
-  for (const bKey of boundary) {
-    const [bq, br] = bKey.split(',').map(Number);
-
-    // The center of the new hex should be at distance `ring` from this boundary cell
-    // Try this boundary cell + ring steps outward
-    const candidates = ring === 0 ? [{ q: bq, r: br }] : getHexRingCells(bq, br, ring);
-
-    for (const c of candidates) {
-      const ck = `${c.q},${c.r}`;
-      if (tested.has(ck)) continue;
-      tested.add(ck);
-
-      // Check if a ring hex centered here fits (no overlap with gridUsed)
-      const hexCells = getHexRingCells(c.q, c.r, ring);
-      const conflicts = hexCells.filter(h => gridUsed.has(`${h.q},${h.r}`)).length;
-      if (conflicts > 0) continue;
-
-      // Score: prefer positions that are closest to existing groups (most adjacent)
-      let adjacency = 0;
-      for (const h of hexCells) {
-        for (const n of hexNeighbors(h.q, h.r)) {
-          if (gridUsed.has(`${n.q},${n.r}`)) adjacency++;
-        }
-      }
-
-      // Also prefer positions close to origin
-      const distFromOrigin = Math.abs(c.q) + Math.abs(c.r);
-      const score = adjacency * 100 - distFromOrigin;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestQ = c.q;
-        bestR = c.r;
+    if (placed.some(p => overlaps(r, p))) {
+      // Fallback: flip below the group
+      ly = folder.y + folder.ring * hexSize * SQRT3 * 1.06 + hexSize * 0.7;
+      r = rectAt(lx, ly);
+      attempts = 0;
+      while (placed.some(p => overlaps(r, p)) && attempts < 8) {
+        attempts++;
+        ly += plateH + 4;
+        r = rectAt(lx, ly);
       }
     }
 
-    if (tested.size > 2000) break; // limit search
+    folder.labelX = lx;
+    folder.labelY = ly;
+    folder.labelRect = r;
+    placed.push(r);
   }
-
-  if (bestScore > -Infinity) return { q: bestQ, r: bestR };
-
-  // Fallback: BFS from origin for a clear spot
-  const visited = new Set();
-  const queue = [{ q: 0, r: 0 }];
-  while (queue.length > 0) {
-    const cur = queue.shift();
-    const key = `${cur.q},${cur.r}`;
-    if (visited.has(key)) continue;
-    visited.add(key);
-    const hexCells = getHexRingCells(cur.q, cur.r, ring);
-    if (hexCells.every(c => !gridUsed.has(`${c.q},${c.r}`))) return cur;
-    for (const n of hexNeighbors(cur.q, cur.r)) {
-      if (!visited.has(`${n.q},${n.r}`)) queue.push(n);
-    }
-    if (visited.size > 500) break;
-  }
-  return { q: bestQ, r: bestR };
 }
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /**
- * Place files and sub-folders inside a perfect hex region.
+ * Compute the Hexis layout.
+ *
+ * @param {Array} files      — [{path, name, group_path, is_landmark, ...}]
+ * @param {Array} groups     — [{path, parent_path, name, ...}]
+ * @param {number} hexSize   — cell radius in pixels (default 30)
+ * @param {object|null} savedState — persistence hints: `{groupPositions, groupRings}`
+ * @returns {object} layout — `{cells, folders, groupRegions, occupancy, cellOwner, _savedState}`
+ *
+ * The returned object includes an attached `_savedState` snapshot suitable
+ * for passing back on the next call (persistence). Callers that don't care
+ * about persistence can ignore it.
  */
-function placeFilesInHex(groupPath, name, cq, cr, ring, hexCells, depth,
-  filesByGroup, childGroupsOf, cells, folders, groupRegions, occupancy, hexSize) {
+export function computeLayout(files, groups, hexSize = HEX_SIZE, savedState = null) {
+  const root = buildForest(files, groups);
 
-  const directFiles = filesByGroup.get(groupPath) || [];
-  const childGroups = childGroupsOf.get(groupPath) || [];
+  // Pass A: bottom-up ring sizing
+  for (const child of root.children) sizeOnlyPass(child);
 
-  // Register region
-  groupRegions.set(groupPath, [...hexCells]);
+  const hints = savedState?.groupPositions
+    ? new Map(
+        Object.entries(savedState.groupPositions).map(([k, v]) => [k, v])
+      )
+    : null;
 
-  // Folder metadata
-  const center = hexToPixel(cq, cr, hexSize);
-  let topY = Infinity, topX = center.x;
-  for (const c of hexCells) {
-    const p = hexToPixel(c.q, c.r, hexSize);
-    if (p.y < topY) { topY = p.y; topX = p.x; }
-  }
+  // Pass B: top-down placement at real centers
+  placeForest(root, hints);
 
-  function countAll(gp) {
-    let count = (filesByGroup.get(gp) || []).length;
-    for (const child of (childGroupsOf.get(gp) || [])) count += countAll(child.path);
-    return count;
-  }
+  // Pass C: project to renderer output
+  const layout = projectToOutput(root, hexSize);
 
-  // Estimate label rect so hit-testing can identify clicks on the
-  // group header. Size roughly matches GroupRenderer.drawGroupLabels
-  // (depth-aware font/plate sizes; width estimated from name length).
-  const rawName = name === '.' ? 'root' : (name || groupPath.split('/').pop() || groupPath);
-  const fontSize = depth === 0 ? 15 : depth === 1 ? 11 : 9;
-  const plateH = depth === 0 ? 26 : depth === 1 ? 20 : 14;
-  const estNameW = rawName.length * fontSize * 0.6;
-  const totalFilesCount = countAll(groupPath);
-  const countDigits = totalFilesCount > 0 ? String(totalFilesCount).length : 0;
-  const countW = depth < 2 && countDigits > 0 ? countDigits * fontSize * 0.55 + 8 : 0;
-  const totalW = estNameW + countW + 24;
-  const labelCX = topX;
-  const labelCY = topY - hexSize * 0.7;
-  const labelRect = {
-    x: labelCX - totalW / 2,
-    y: labelCY - plateH / 2,
-    w: totalW,
-    h: plateH,
+  // Snapshot resulting state for persistence
+  const newSavedState = {
+    version: 1,
+    groupPositions: {},
+    groupRings: {},
   };
-
-  folders.set(groupPath, {
-    x: center.x, y: center.y,
-    radius: ring * hexSize * 1.8,
-    labelX: topX, labelY: topY,
-    labelRect,
-    name: name || groupPath.split('/').pop() || groupPath,
-    depth, ring, cq, cr,
-    fileCount: directFiles.length,
-    childCount: childGroups.length,
-    totalFiles: totalFilesCount,
-    path: groupPath,
-    cellCount: hexCells.length,
-  });
-
-  // Available cells for placement (BFS from center outward)
-  const available = [...hexCells].sort((a, b) => {
-    const da = hexDistance(cq, cr, a.q, a.r);
-    const db = hexDistance(cq, cr, b.q, b.r);
-    return da - db; // center first
-  });
-
-  const usedInGroup = new Set();
-
-  // Place child sub-folders first (they need contiguous regions)
-  const sortedChildren = [...childGroups].sort((a, b) => countAll(b.path) - countAll(a.path));
-
-  for (const child of sortedChildren) {
-    const childTotal = countAll(child.path);
-    // Don't skip empty children — an empty sub-group still renders at
-    // min ring-1 (7 cells) with its label, per the always-hex rule.
-    let childRing = ringForGroup(childTotal);
-
-    // Find a sub-center within available cells (may reduce ring if needed)
-    const subResult = findSubCenter(available, usedInGroup, childRing, cq, cr);
-    if (!subResult) continue;
-    const subCenter = subResult.center;
-    childRing = subResult.ring; // use the actual ring that fits
-
-    // Claim COMPLETE hex ring for this sub-folder
-    const ringCells = getHexRingCells(subCenter.q, subCenter.r, childRing);
-    const parentSet = new Set(available.map(a => `${a.q},${a.r}`));
-    const subCells = [];
-    let rejected = [];
-    for (const rc of ringCells) {
-      const key = `${rc.q},${rc.r}`;
-      const inParent = parentSet.has(key);
-      const used = usedInGroup.has(key);
-      if (inParent && !used) {
-        subCells.push(rc);
-        usedInGroup.add(key);
-      } else {
-        rejected.push(`${key}(inP=${inParent},used=${used})`);
-      }
-    }
-
-    if (subCells.length > 0) {
-      placeFilesInHex(child.path, child.name || child.path.split('/').pop(),
-        subCenter.q, subCenter.r, childRing, subCells, depth + 1,
-        filesByGroup, childGroupsOf, cells, folders, groupRegions, occupancy, hexSize);
-    }
+  for (const [path, folder] of layout.folders) {
+    newSavedState.groupPositions[path] = [folder.cq, folder.cr];
+    newSavedState.groupRings[path] = folder.ring;
   }
+  layout._savedState = newSavedState;
 
-  // Place direct files in remaining cells
-  const remainingCells = available.filter(c => !usedInGroup.has(`${c.q},${c.r}`));
-  const sortedFiles = [...directFiles].sort((a, b) => (b.is_landmark ? 1 : 0) - (a.is_landmark ? 1 : 0));
-
-  for (let i = 0; i < sortedFiles.length && i < remainingCells.length; i++) {
-    const cell = remainingCells[i];
-    const file = sortedFiles[i];
-    const pos = hexToPixel(cell.q, cell.r, hexSize);
-
-    cells.set(file.path, {
-      q: cell.q, r: cell.r,
-      x: pos.x, y: pos.y,
-      parentFolder: groupPath,
-    });
-    occupancy.set(`${cell.q},${cell.r}`, file.path);
-  }
+  return layout;
 }
-
-/**
- * Find a center for a sub-folder hex where the COMPLETE ring fits.
- * Only accepts positions where 100% of the ring cells are available.
- * Falls back to best partial fit if no perfect fit exists.
- */
-function findSubCenter(available, usedInGroup, childRing, parentCQ, parentCR) {
-  const freeSet = new Set();
-  for (const c of available) {
-    if (!usedInGroup.has(`${c.q},${c.r}`)) freeSet.add(`${c.q},${c.r}`);
-  }
-
-  const needed = hexCellCount(childRing);
-  // Build set of all cells in parent for quick lookup
-  const parentSet = new Set(available.map(c => `${c.q},${c.r}`));
-
-  let bestCell = null;
-  let bestFit = 0;
-
-  // Sort candidates: prefer cells AWAY from parent center (leaves room for siblings)
-  const sortedCandidates = available
-    .filter(c => !usedInGroup.has(`${c.q},${c.r}`))
-    .sort((a, b) => {
-      const da = hexDistance(parentCQ, parentCR, a.q, a.r);
-      const db = hexDistance(parentCQ, parentCR, b.q, b.r);
-      return db - da; // farthest from center first
-    });
-
-  for (const c of sortedCandidates) {
-    const ringCells = getHexRingCells(c.q, c.r, childRing);
-    let fit = 0;
-    let allInParent = true;
-    for (const rc of ringCells) {
-      const key = `${rc.q},${rc.r}`;
-      if (!parentSet.has(key)) { allInParent = false; break; }
-      if (freeSet.has(key)) fit++;
-    }
-
-    if (allInParent && fit === ringCells.length) {
-      return { center: c, ring: childRing }; // PERFECT
-    }
-
-    if (allInParent && fit > bestFit) {
-      bestFit = fit;
-      bestCell = c;
-    }
-  }
-
-  // Perfect fit found at this ring
-  if (bestCell && bestFit === needed) return { center: bestCell, ring: childRing };
-
-
-  // No perfect fit — try smaller ring
-  if (childRing > 0) {
-    return findSubCenter(available, usedInGroup, childRing - 1, parentCQ, parentCR);
-  }
-
-  // Absolute fallback: ring-0 (single cell)
-  for (const c of available) {
-    if (!usedInGroup.has(`${c.q},${c.r}`)) return { center: c, ring: 0 };
-  }
-  return null;
-}
-
-/** Find nearest empty cell for drag-drop. */
-export function findNearestEmpty(px, py, hexSize, occupancy) {
-  const gap = 1.06;
-  const SQRT3 = Math.sqrt(3);
-  const colW = hexSize * 1.5 * gap;
-  const rowH = hexSize * SQRT3 * gap;
-  const q0 = Math.round(px / colW);
-  const yOff = (q0 & 1) ? rowH * 0.5 : 0;
-  const r0 = Math.round((py - yOff) / rowH);
-
-  if (!occupancy.has(`${q0},${r0}`)) return { q: q0, r: r0 };
-
-  const visited = new Set([`${q0},${r0}`]);
-  const queue = [{ q: q0, r: r0 }];
-  while (queue.length > 0) {
-    const cur = queue.shift();
-    for (const n of hexNeighbors(cur.q, cur.r)) {
-      const nk = `${n.q},${n.r}`;
-      if (!visited.has(nk)) {
-        visited.add(nk);
-        if (!occupancy.has(nk)) return n;
-        if (visited.size < 200) queue.push(n);
-      }
-    }
-  }
-  return { q: q0, r: r0 };
-}
-

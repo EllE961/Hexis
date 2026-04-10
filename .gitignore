@@ -28,3 +28,6 @@ Thumbs.db
 .hexis/memories/research/
 .hexis/memories/runs/
 .hexis/state-*.json
+
+# Per-workspace hex layout state — regenerated on demand, not source.
+.hexis/layout.json

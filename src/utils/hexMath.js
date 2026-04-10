@@ -234,3 +234,53 @@ export function pointInHex(px, py, cx, cy, size) {
   // Sloped edge: line from (size, 0) to (size/2, size*√3/2)
   return dx + dy / SQRT3 <= size;
 }
+
+// ─── Rings ───
+
+/**
+ * Number of cells in a filled hex of the given ring radius:
+ *   ring 0 → 1, ring 1 → 7, ring 2 → 19, ring 3 → 37, ...
+ * Formula: 3r² + 3r + 1.
+ */
+export function hexCellCount(ring) {
+  return 3 * ring * ring + 3 * ring + 1;
+}
+
+/**
+ * Returns the cells at exact hex-distance `d` from `(cq, cr)` (the thin
+ * ring at radius `d`). For d = 0 returns only the origin cell; for d > 0
+ * there are exactly 6d cells. Brute-forces over the bounding box to stay
+ * correct under the odd-q offset parity used by `hexDistance`.
+ *
+ * @param {number} cq — center column
+ * @param {number} cr — center row
+ * @param {number} d  — integer ring radius (≥ 0)
+ * @returns {Array<{q: number, r: number}>} cells at exactly distance d
+ */
+export function cellsAtDistance(cq, cr, d) {
+  if (d === 0) return [{ q: cq, r: cr }];
+  const out = [];
+  // Search window: distance is ≤ max(|Δq|, |Δy|, |Δz|) in cube coords,
+  // so the hex ring at distance d fits inside a (2d × 4d) offset box
+  // (doubling r because parity-shifted columns may reach ± 2d in r).
+  for (let q = cq - d; q <= cq + d; q++) {
+    for (let r = cr - d * 2; r <= cr + d * 2; r++) {
+      if (hexDistance(cq, cr, q, r) === d) out.push({ q, r });
+    }
+  }
+  return out;
+}
+
+/**
+ * Returns the FILLED hex of cells at hex-distance ≤ `ring` from (cq, cr).
+ * Brute-forces over the bounding box to stay correct for odd-q offsets.
+ */
+export function getHexDisk(cq, cr, ring) {
+  const out = [];
+  for (let q = cq - ring; q <= cq + ring; q++) {
+    for (let r = cr - ring * 2; r <= cr + ring * 2; r++) {
+      if (hexDistance(cq, cr, q, r) <= ring) out.push({ q, r });
+    }
+  }
+  return out;
+}

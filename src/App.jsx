@@ -29,7 +29,7 @@ import ConfirmModal from './components/modals/ConfirmModal.jsx';
 import { useClipboardStore } from './stores/clipboardStore.js';
 import { useFileOpsHistoryStore } from './stores/fileOpsHistoryStore.js';
 import { useSelectionStore } from './stores/selectionStore.js';
-import { useLayoutAnchorsStore } from './stores/layoutAnchorsStore.js';
+import { useLayoutStateStore } from './stores/layoutStateStore.js';
 import { W } from './theme/window-tokens.js';
 
 const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
@@ -86,6 +86,16 @@ export default function App() {
   const selectedCellSet = useSelectionStore(s => s.selected);
 
   const lastClickRef = useRef({ time: 0, path: null });
+  // Imperative handle on the hex canvas — used for post-drop glow triggers
+  // and View → Re-optimize Hex Layout.
+  const hexCanvasRef = useRef(null);
+
+  // Hard refresh: clear saved layout state and force a ground-up recompute.
+  // Bound to Ctrl+Shift+L and the View menu item.
+  const hardRefreshLayout = useCallback(() => {
+    useLayoutStateStore.getState().clear();
+    hexCanvasRef.current?.hardRefresh();
+  }, []);
 
   // Command palette handler
   const handleCommand = useCallback((commandId) => {
@@ -361,6 +371,9 @@ export default function App() {
       case 'view:terminal':        togglePanel('terminal'); break;
       case 'view:timeline':        togglePanel('timeline'); break;
       case 'view:tasks':           togglePanel('taskboard'); break;
+      case 'view:reoptimizeLayout':
+        hardRefreshLayout();
+        break;
       case 'view:toggleFullscreen':
         if (IS_TAURI) {
           try {
@@ -523,6 +536,8 @@ export default function App() {
         { id: 'view:timeline', label: 'Git Timeline', shortcut: 'Ctrl+T', mnemonic: 'i', checked: panels.timeline?.visible },
         { id: 'view:tasks', label: 'Tasks', shortcut: 'Ctrl+B', mnemonic: 'k', checked: panels.taskboard?.visible },
         { separator: true },
+        { id: 'view:reoptimizeLayout', label: 'Re-optimize Hex Layout', shortcut: 'Ctrl+Shift+L', mnemonic: 'L' },
+        { separator: true },
         { id: 'view:toggleFullscreen', label: 'Toggle Full Screen', shortcut: 'F11', mnemonic: 'F' },
       ],
     },
@@ -578,10 +593,10 @@ export default function App() {
     resolveWorkspace();
   }, [resolveWorkspace]);
 
-  // Sync the layout-anchors store with the active workspace so each
-  // workspace gets its own persisted set of group positions.
+  // Sync the layout-state store with the active workspace so each
+  // workspace gets its own persisted group positions + ring sizes.
   useEffect(() => {
-    useLayoutAnchorsStore.getState().setWorkspace(workspace || null);
+    useLayoutStateStore.getState().setWorkspace(workspace || null);
   }, [workspace]);
 
   // Load project. Re-runs whenever the workspace changes (Tauri folder
@@ -832,6 +847,10 @@ export default function App() {
           refreshWorkspace();
         } else if (batchOps.length > 0) {
           history.push({ kind: 'batch', ops: batchOps });
+          // 5s landing glow on each successfully moved file
+          for (const op of batchOps) {
+            hexCanvasRef.current?.markRecentDrop(op.toPath, 'file');
+          }
           try { useGitStore.getState().fetchStatus(); } catch {}
         }
         sel.clear();
@@ -849,20 +868,14 @@ export default function App() {
         refreshWorkspace();
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'file' });
+        hexCanvasRef.current?.markRecentDrop(to, 'file');
         // Don't re-scan — the optimistic patch is the truth.
         // Just poll git for fresh status since the move may have changed it.
         try { useGitStore.getState().fetchStatus(); } catch {}
       }
     } else if (kind === 'group') {
-      // Always persist the new user anchor at the drop coordinates
-      // (freeform placement). The tree change (if any) is separate.
-      const dt = dropTarget;
-      if (dt && typeof dt.q === 'number' && typeof dt.r === 'number') {
-        useLayoutAnchorsStore.getState().setAnchor(to, dt.q, dt.r);
-      }
-
-      // If the path didn't actually change (same parent, just visual
-      // reposition), we're done — no backend call needed.
+      // Same-path drops are no-ops — the layout engine auto-packs
+      // (no manual positioning), so "drop group onto itself" does nothing.
       if (from === to) return;
 
       // Optimistic patch: update the group's own path + every file/child whose
@@ -882,20 +895,13 @@ export default function App() {
         return f;
       }));
 
-      // Migrate the anchor to the new path so the next render uses the
-      // correct key, then clear the old path's anchor.
-      const anchorStore = useLayoutAnchorsStore.getState();
-      if (dt && typeof dt.q === 'number' && typeof dt.r === 'number') {
-        anchorStore.setAnchor(to, dt.q, dt.r);
-      }
-      if (from !== to) anchorStore.clearAnchor(from);
-
       const result = await ed.moveFolder(from, to);
       if (result?.ok === false) {
         console.warn('Group drop failed, refreshing:', result.error);
         refreshWorkspace();
       } else {
         history.push({ kind: 'move', fromPath: from, toPath: to, entity: 'folder' });
+        hexCanvasRef.current?.markRecentDrop(to, 'group');
         try { useGitStore.getState().fetchStatus(); } catch {}
       }
     }
@@ -1209,9 +1215,6 @@ export default function App() {
             try {
               const r = await ed.deleteFolder(groupPath);
               if (r?.ok === false) throw new Error(r.error || 'Delete failed');
-              // Clear the deleted group's anchor (and any descendants' anchors)
-              const anchorStore = useLayoutAnchorsStore.getState();
-              for (const g of snapshotGroups) anchorStore.clearAnchor(g.path);
               try { useGitStore.getState().fetchStatus(); } catch {}
             } catch (err) {
               // Rollback
@@ -1462,10 +1465,15 @@ export default function App() {
         e.preventDefault();
         handleMenuAction('file:newFolder');
       }
+      // Ctrl+Shift+L: re-optimize hex layout (wipes saved state, repacks)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'L' || e.key === 'l')) {
+        e.preventDefault();
+        hardRefreshLayout();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [activeTab, togglePanel, handleMenuAction, handleHexContextAction, selectedCell, files, historyDeps, refreshWorkspace]);
+  }, [activeTab, togglePanel, handleMenuAction, handleHexContextAction, selectedCell, files, historyDeps, refreshWorkspace, hardRefreshLayout]);
 
   const changedCount = modified.length + staged.length + untracked.length;
 
@@ -1537,6 +1545,7 @@ export default function App() {
           <DockPanel key="taskboard" id="taskboard" title="Tasks" icon="☰"><TaskBoard /></DockPanel>,
         ]}>
           <HexCanvas
+            ref={hexCanvasRef}
             files={enrichedFiles}
             groups={groups}
             selectedCell={selectedCell}

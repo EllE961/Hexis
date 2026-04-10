@@ -3,7 +3,7 @@
  * Direct Canvas2D. Handles rendering, viewport, hit testing, interaction.
  */
 
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
 import { Viewport } from './Viewport.js';
 import { hexToPixel, pixelToHex, getVisibleHexRange, isHexVisible, hexNeighbors, hexPath } from '../../utils/hexMath.js';
 import { computeLayout } from '../../utils/hexLayout.js';
@@ -14,6 +14,7 @@ import { CellAnimator } from './CellAnimator.js';
 import { LayoutAnimator } from './LayoutAnimator.js';
 import { makeCellDragState, computeDropTarget, computeDestinationPath } from './CellDrag.js';
 import { useSearchStore } from '../../stores/searchStore.js';
+import { useLayoutStateStore } from '../../stores/layoutStateStore.js';
 
 const HEX_SIZE = 30; // global grid cell size
 const BG_COLOR = '#0D1117';
@@ -123,7 +124,7 @@ function drawFlightPlan(ctx, subtasks, layout, hiveX, hiveY) {
   ctx.restore();
 }
 
-export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClick, onCellHover, onCellContextMenu, onCellDrop, onOSDrop, onBeeClick, selectedCell, selectedCells, cellActivity, activeAgents, pendingPlan }) {
+const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, onCellDoubleClick, onCellHover, onCellContextMenu, onCellDrop, onOSDrop, onBeeClick, selectedCell, selectedCells, cellActivity, activeAgents, pendingPlan }, ref) {
   const canvasRef = useRef(null);
   const viewportRef = useRef(null);
   const layoutRef = useRef(null);
@@ -140,11 +141,36 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
   const hoverPulseRef = useRef({ innermost: null, startTime: 0 });
   // Search match cache — updated on every search store change; read by render loop
   const searchMatchesRef = useRef({ map: new Map(), startTime: 0 });
+  // Recent drop glow — map<path, {startTime, kind}> for 5s landing glow
+  const recentDropsRef = useRef(new Map());
   // Cell/group drag state. All drag coordinates + drop target live in
   // this ref so the render loop can read them each frame WITHOUT causing
   // React re-renders during drag. Populated by onPointerDown/Move/Up.
   const cellDragRef = useRef(makeCellDragState());
   const [, forceRender] = useState(0);
+
+  // Expose imperative methods to App.jsx (drop glow trigger + hard refresh)
+  useImperativeHandle(ref, () => ({
+    /**
+     * Start a 5-second landing glow on the given file or group path.
+     * Called after a successful drop so the user can see where the item
+     * landed. White pulsing — distinct from search glow (amber) and
+     * hover ring cascade (depth-ranked).
+     */
+    markRecentDrop: (path, kind = 'file') => {
+      if (!path) return;
+      recentDropsRef.current.set(path, { startTime: performance.now(), kind });
+      forceRender(n => n + 1); // kick the render loop
+    },
+    /**
+     * Invalidate the layout cache + force full recompute with no saved
+     * hints. Called by the View → Re-optimize Hex Layout menu.
+     */
+    hardRefresh: () => {
+      layoutHashRef.current = '';
+      forceRender(n => n + 1);
+    },
+  }), []);
 
   // Neutral stone tone for root-level files — they are not a group,
   // so they should read visually distinct from any honey-colored cluster.
@@ -312,10 +338,14 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
   // + groupings are unchanged. Only structural changes invalidate the
   // layout — git status, modified time, etc. do NOT cause recompute.
   const layoutHashRef = useRef('');
+  // Subscribe to the layout-state store's revision so hard-refresh triggers
+  // a recompute. We read .state imperatively below for the hint input.
+  const layoutRevision = useLayoutStateStore(s => s.revision);
   useEffect(() => {
     if (files.length === 0) return;
-    // Cheap content hash — covers everything that affects layout
-    let hash = `${files.length}|${groups.length}`;
+    // Cheap content hash — covers everything that affects layout.
+    // Revision bumps on hard-refresh and on save, so the cache busts.
+    let hash = `${files.length}|${groups.length}|rev${layoutRevision}`;
     for (const f of files) hash += `|${f.path}:${f.group_path || ''}${f.is_landmark ? '*' : ''}`;
     for (const g of groups) hash += `|${g.path}:${g.parent_path || ''}`;
     if (hash === layoutHashRef.current && layoutRef.current) {
@@ -328,8 +358,17 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
     layoutHashRef.current = hash;
     // Snapshot OUTGOING positions so we can animate into the new layout
     layoutAnimatorRef.current.snapshot(layoutRef.current?.cells);
-    const layout = computeLayout(files, groups, HEX_SIZE);
+    // Pass saved state (if any) as hints for visual stability
+    const savedState = useLayoutStateStore.getState().state;
+    const layout = computeLayout(files, groups, HEX_SIZE, savedState);
     layoutRef.current = layout;
+    // Persist the fresh state for next round-trip (fire-and-forget).
+    // Using setTimeout avoids a render cycle inside this effect.
+    if (layout._savedState) {
+      setTimeout(() => {
+        useLayoutStateStore.getState().save(layout._savedState);
+      }, 0);
+    }
     // Begin transitioning from old positions to new ones
     layoutAnimatorRef.current.transition(layout.cells, performance.now());
     // Pre-build file map
@@ -358,7 +397,7 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       if (minX !== Infinity) vp.fitBounds(minX, minY, maxX, maxY, HEX_SIZE * 2);
     }
     forceRender(n => n + 1);
-  }, [files, groups]);
+  }, [files, groups, layoutRevision]);
 
   // ─── Sync bees with agents + activity ───
   useEffect(() => {
@@ -694,7 +733,50 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
         }
       }
 
-      // 4d. Drag ghost — if a cell/group is being dragged, draw a
+      // 4d. Recent drop glow — after a successful drop, the dropped
+      //     file or group pulses bright white for 5 seconds so the user
+      //     can see exactly where it landed. Distinct from search glow
+      //     (amber), hover cascade (depth rings), and selection (accent).
+      const recentDrops = recentDropsRef.current;
+      if (recentDrops.size > 0) {
+        const now = performance.now();
+        const expired = [];
+        for (const [path, meta] of recentDrops) {
+          const elapsed = now - meta.startTime;
+          if (elapsed >= 5000) { expired.push(path); continue; }
+          const fade = 1 - (elapsed / 5000);
+          const pulse = 0.6 + 0.4 * Math.sin(elapsed * 0.006);
+          const alpha = fade * pulse;
+
+          if (meta.kind === 'file') {
+            const cell = layout.cells.get(path);
+            if (!cell) continue;
+            if (!isHexVisible(cell.q, cell.r, hexRange)) continue;
+            ctx.save();
+            ctx.shadowBlur = 24 * pulse;
+            ctx.shadowColor = `rgba(255, 255, 255, ${0.9 * alpha})`;
+            hexPath(ctx, cell.x, cell.y, HEX_SIZE * 1.08);
+            ctx.strokeStyle = `rgba(255, 255, 255, ${0.95 * alpha})`;
+            ctx.lineWidth = 2.8;
+            ctx.stroke();
+            ctx.restore();
+          } else {
+            const folder = layout.folders.get(path);
+            if (!folder) continue;
+            ctx.save();
+            ctx.shadowBlur = 30 * pulse;
+            ctx.shadowColor = `rgba(255, 255, 255, ${0.85 * alpha})`;
+            ctx.strokeStyle = `rgba(255, 255, 255, ${0.9 * alpha})`;
+            ctx.lineWidth = 3.2;
+            hexPath(ctx, folder.x, folder.y, folder.ring * HEX_SIZE * 1.85);
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+        for (const p of expired) recentDrops.delete(p);
+      }
+
+      // 4e. Drag ghost — if a cell/group is being dragged, draw a
       //     semi-transparent copy of the source at the cursor position.
       //     The drop target highlight is already handled above in the
       //     empty-cell pass (via cellDragRef.current.dropTarget).
@@ -1106,4 +1188,6 @@ export default function HexCanvas({ files, groups, onCellClick, onCellDoubleClic
       }}
     />
   );
-}
+});
+
+export default HexCanvas;

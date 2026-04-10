@@ -25,6 +25,7 @@ import { MenuBar } from './components/MenuBar/MenuBar.jsx';
 import { ContextMenu } from './components/ContextMenu/ContextMenu.jsx';
 import { buildContextMenuItems } from './components/ContextMenu/hexContextMenu.js';
 import NameInputModal from './components/modals/NameInputModal.jsx';
+import ConfirmModal from './components/modals/ConfirmModal.jsx';
 import { useClipboardStore } from './stores/clipboardStore.js';
 import { useFileOpsHistoryStore } from './stores/fileOpsHistoryStore.js';
 import { useSelectionStore } from './stores/selectionStore.js';
@@ -766,6 +767,9 @@ export default function App() {
   const [ctxMenu, setCtxMenu] = useState(null);
   // nameModal shape when open: { title, placeholder, initial, onSubmit }
   const [nameModal, setNameModal] = useState(null);
+  // confirmModal shape when open: { title, message, details?, destructive?,
+  //   confirmLabel?, onConfirm }
+  const [confirmModal, setConfirmModal] = useState(null);
 
   const handleCellContextMenu = useCallback(({ x, y, target }) => {
     const items = buildContextMenuItems(target, {
@@ -781,7 +785,9 @@ export default function App() {
   // so the layout reflows instantly, then confirm with the backend.
   // On error we rollback by calling refreshWorkspace(). Every successful
   // move is pushed onto the undo stack.
-  const handleCellDrop = useCallback(async ({ kind, from, to, dropTarget }) => {
+  // The actual move executor. Called after the user confirms the drop.
+  // Returns immediately if nothing actually needs to change.
+  const executeCellDrop = useCallback(async ({ kind, from, to, dropTarget }) => {
     const ed = useEditorStore.getState();
     const history = useFileOpsHistoryStore.getState();
 
@@ -894,6 +900,66 @@ export default function App() {
       }
     }
   }, [refreshWorkspace]);
+
+  // Public drop handler — shows a confirm modal before executing any
+  // move that actually changes a file/folder path. Pure visual-only
+  // repositions (group drag with from === to) skip the confirm since
+  // they're reversible (just a local anchor update) and the workflow
+  // relies on being able to drag groups around freely.
+  const handleCellDrop = useCallback(({ kind, from, to, dropTarget }) => {
+    const sel = useSelectionStore.getState();
+    const selected = sel.toArray();
+    const isMulti = kind === 'file' && selected.length > 1 && sel.has(from);
+
+    // Skip confirm for visual-only group repositions (same path)
+    if (kind === 'group' && from === to) {
+      executeCellDrop({ kind, from, to, dropTarget });
+      return;
+    }
+
+    // Build a friendly confirm message for each case
+    let title, message, details, confirmLabel;
+
+    if (isMulti) {
+      const targetGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '(workspace root)';
+      title = `Move ${selected.length} files?`;
+      message = (
+        <>Move {selected.length} selected files into <code style={{ color: '#F0A030' }}>{targetGroup === '.' ? '(workspace root)' : targetGroup}</code>?</>
+      );
+      details = selected.slice(0, 20).join('\n') + (selected.length > 20 ? `\n... +${selected.length - 20} more` : '');
+      confirmLabel = `Move ${selected.length} files`;
+    } else if (kind === 'file') {
+      const fromGroup = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '(root)';
+      const toGroup = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '(root)';
+      title = 'Move file?';
+      message = (
+        <>Move <code style={{ color: '#F0A030' }}>{from.split('/').pop()}</code> from <code style={{ color: '#8B949E' }}>{fromGroup}</code> to <code style={{ color: '#58A6FF' }}>{toGroup}</code>?</>
+      );
+      details = `${from}\n     ↓\n${to}`;
+      confirmLabel = 'Move file';
+    } else if (kind === 'group') {
+      const fromParent = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '(root)';
+      const toParent = to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '(root)';
+      title = 'Move folder?';
+      message = (
+        <>Move folder <code style={{ color: '#F0A030' }}>{from.split('/').pop()}</code> and ALL its contents from <code style={{ color: '#8B949E' }}>{fromParent}</code> to <code style={{ color: '#58A6FF' }}>{toParent}</code>?</>
+      );
+      details = `${from}\n     ↓\n${to}\n\nWARNING: this moves every file inside the folder.`;
+      confirmLabel = 'Move folder';
+    }
+
+    setConfirmModal({
+      title,
+      message,
+      details,
+      confirmLabel,
+      destructive: false,
+      onConfirm: () => {
+        setConfirmModal(null);
+        executeCellDrop({ kind, from, to, dropTarget });
+      },
+    });
+  }, [executeCellDrop]);
 
   // OS drag-in: files dropped from File Explorer / Finder onto the hex
   // grid. Copies each source file into the target group using the Tauri
@@ -1019,18 +1085,28 @@ export default function App() {
       }
       case 'delete': {
         const filePath = arg;
-        if (!confirm(`Delete ${filePath}?`)) return;
-        // Snapshot the file for rollback, then optimistically remove
         const snapshot = files.find(f => f.path === filePath);
-        setFiles(prev => prev.filter(f => f.path !== filePath));
-        try {
-          await ed.deleteFile(filePath);
-          try { useGitStore.getState().fetchStatus(); } catch {}
-        } catch (err) {
-          // Rollback on failure
-          if (snapshot) setFiles(prev => [...prev, snapshot]);
-          alert(`Delete failed: ${err.message || err}`);
-        }
+        setConfirmModal({
+          title: 'Delete file?',
+          message: (
+            <>Delete <code style={{ color: '#EF4444' }}>{filePath.split('/').pop()}</code>? It will be moved to the system recycle bin — you can restore it from there.</>
+          ),
+          details: filePath,
+          destructive: true,
+          confirmLabel: 'Delete',
+          onConfirm: async () => {
+            setConfirmModal(null);
+            // Optimistic remove
+            setFiles(prev => prev.filter(f => f.path !== filePath));
+            try {
+              await ed.deleteFile(filePath);
+              try { useGitStore.getState().fetchStatus(); } catch {}
+            } catch (err) {
+              if (snapshot) setFiles(prev => [...prev, snapshot]);
+              alert(`Delete failed: ${err.message || err}`);
+            }
+          },
+        });
         break;
       }
       case 'newFile': {
@@ -1112,27 +1188,39 @@ export default function App() {
       }
       case 'deleteGroup': {
         const groupPath = arg;
-        if (!confirm(`Delete folder "${groupPath}" and ALL its contents?`)) return;
-        // Snapshot for rollback, then optimistically remove the group AND
-        // all files/sub-groups whose paths start with it.
         const prefix = groupPath.endsWith('/') ? groupPath : groupPath + '/';
         const snapshotFiles = files.filter(f => f.path === groupPath || f.path.startsWith(prefix));
         const snapshotGroups = groups.filter(g => g.path === groupPath || g.path.startsWith(prefix));
-        setFiles(prev => prev.filter(f => !(f.path === groupPath || f.path.startsWith(prefix))));
-        setGroups(prev => prev.filter(g => !(g.path === groupPath || g.path.startsWith(prefix))));
-        try {
-          const r = await ed.deleteFolder(groupPath);
-          if (r?.ok === false) throw new Error(r.error || 'Delete failed');
-          // Clear the deleted group's anchor (and any descendants' anchors)
-          const anchorStore = useLayoutAnchorsStore.getState();
-          for (const g of snapshotGroups) anchorStore.clearAnchor(g.path);
-          try { useGitStore.getState().fetchStatus(); } catch {}
-        } catch (err) {
-          // Rollback
-          setFiles(prev => [...prev, ...snapshotFiles]);
-          setGroups(prev => [...prev, ...snapshotGroups]);
-          alert(`Delete failed: ${err.message || err}`);
-        }
+        const fileCount = snapshotFiles.length;
+        const subGroupCount = snapshotGroups.length - 1;
+        setConfirmModal({
+          title: 'Delete folder?',
+          message: (
+            <>Delete <code style={{ color: '#EF4444' }}>{groupPath}</code> and ALL its contents? {fileCount > 0 && <><strong>{fileCount} file{fileCount === 1 ? '' : 's'}</strong></>}{subGroupCount > 0 && <> and <strong>{subGroupCount} sub-folder{subGroupCount === 1 ? '' : 's'}</strong></>}{fileCount + subGroupCount === 0 && <>the empty folder</>} will be moved to the system recycle bin.</>
+          ),
+          details: snapshotFiles.slice(0, 15).map(f => f.path).join('\n') + (fileCount > 15 ? `\n... +${fileCount - 15} more files` : ''),
+          destructive: true,
+          confirmLabel: `Delete ${fileCount + subGroupCount + 1} item${fileCount + subGroupCount === 0 ? '' : 's'}`,
+          onConfirm: async () => {
+            setConfirmModal(null);
+            // Optimistic remove
+            setFiles(prev => prev.filter(f => !(f.path === groupPath || f.path.startsWith(prefix))));
+            setGroups(prev => prev.filter(g => !(g.path === groupPath || g.path.startsWith(prefix))));
+            try {
+              const r = await ed.deleteFolder(groupPath);
+              if (r?.ok === false) throw new Error(r.error || 'Delete failed');
+              // Clear the deleted group's anchor (and any descendants' anchors)
+              const anchorStore = useLayoutAnchorsStore.getState();
+              for (const g of snapshotGroups) anchorStore.clearAnchor(g.path);
+              try { useGitStore.getState().fetchStatus(); } catch {}
+            } catch (err) {
+              // Rollback
+              setFiles(prev => [...prev, ...snapshotFiles]);
+              setGroups(prev => [...prev, ...snapshotGroups]);
+              alert(`Delete failed: ${err.message || err}`);
+            }
+          },
+        });
         break;
       }
       case 'moveTo': {
@@ -1143,18 +1231,33 @@ export default function App() {
         const destParent = parts.slice(2).join(':');
         const leafName = path.split('/').pop();
         const newPath = destParent && destParent !== '.' ? `${destParent}/${leafName}` : leafName;
-        const result = kind === 'file'
-          ? await ed.renameFile(path, newPath)
-          : await ed.moveFolder(path, newPath);
-        if (result?.ok !== false) {
-          useFileOpsHistoryStore.getState().push({
-            kind: 'move',
-            fromPath: path,
-            toPath: newPath,
-            entity: kind === 'file' ? 'file' : 'folder',
-          });
-        }
-        refreshWorkspace();
+        const destLabel = destParent && destParent !== '.' ? destParent : '(workspace root)';
+        setConfirmModal({
+          title: kind === 'file' ? 'Move file?' : 'Move folder?',
+          message: (
+            <>Move <code style={{ color: '#F0A030' }}>{leafName}</code> to <code style={{ color: '#58A6FF' }}>{destLabel}</code>?</>
+          ),
+          details: `${path}\n     ↓\n${newPath}`,
+          destructive: false,
+          confirmLabel: kind === 'file' ? 'Move file' : 'Move folder',
+          onConfirm: async () => {
+            setConfirmModal(null);
+            const result = kind === 'file'
+              ? await ed.renameFile(path, newPath)
+              : await ed.moveFolder(path, newPath);
+            if (result?.ok !== false) {
+              useFileOpsHistoryStore.getState().push({
+                kind: 'move',
+                fromPath: path,
+                toPath: newPath,
+                entity: kind === 'file' ? 'file' : 'folder',
+              });
+              try { useGitStore.getState().fetchStatus(); } catch {}
+            } else {
+              refreshWorkspace();
+            }
+          },
+        });
         break;
       }
       case 'copyPath': {
@@ -1559,6 +1662,21 @@ export default function App() {
           initial={nameModal.initial}
           onSubmit={nameModal.onSubmit}
           onClose={() => setNameModal(null)}
+        />
+      )}
+
+      {/* Confirmation modal — used for destructive ops (delete,
+          cross-group moves, drag-drop folder moves) */}
+      {confirmModal && (
+        <ConfirmModal
+          open
+          title={confirmModal.title}
+          message={confirmModal.message}
+          details={confirmModal.details}
+          destructive={confirmModal.destructive}
+          confirmLabel={confirmModal.confirmLabel}
+          onConfirm={confirmModal.onConfirm}
+          onClose={() => setConfirmModal(null)}
         />
       )}
 

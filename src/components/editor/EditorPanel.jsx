@@ -180,7 +180,9 @@ export default function EditorPanel() {
   const [contextMenu, setContextMenu] = useState(null); // { x, y, path }
   const [outline, setOutline] = useState([]);
   const [breadcrumb, setBreadcrumb] = useState([]);
-  const [outlineOpen, setOutlineOpen] = useState(true);
+  // Outline panel is closed by default — users open it explicitly with
+  // Ctrl+Shift+O or the toolbar toggle when they want the symbol tree.
+  const [outlineOpen, setOutlineOpen] = useState(false);
   const upsertSymbols = useSymbolIndexStore(s => s.upsert);
   const toggleBookmark = useBookmarksStore(s => s.toggle);
   const nextBookmark = useBookmarksStore(s => s.next);

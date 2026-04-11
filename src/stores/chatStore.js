@@ -258,6 +258,77 @@ export const useChatStore = create((set, get) => ({
     const chat = s.chats[chatId];
     if (!chat || chat.sending) return;
 
+    // ─── Session commands — pure client-side, no agent ───
+    // These don't go through the HTTP chat flow at all; they mutate
+    // chat state or open a help message locally. Claude-Code parity.
+    if (/^\/clear(?:\s|$)/i.test(text)) {
+      get().clearMessages(chatId);
+      return;
+    }
+    if (/^\/help(?:\s|$)/i.test(text)) {
+      const helpText = [
+        '## Chat commands',
+        '',
+        '- `/research <query>` — deep 6-phase research pipeline',
+        '- `/task <description>` — full Writer → Planner → Coder → Critic pipeline',
+        '- `/clear` — wipe this chat\'s messages and session',
+        '- `/model sonnet` or `/model opus` — switch model for this chat',
+        '- `/help` — show this message',
+        '',
+        '## Keyboard shortcuts',
+        '',
+        '- **Ctrl+/** — focus chat input from anywhere',
+        '- **Esc** — panic button, return to chat prompt',
+        '- **Ctrl+E** — toggle editor panel',
+        '- **Ctrl+K** — command palette',
+        '- **↑ / ↓** — recall previous chat messages',
+        '- **@** — reference a project file',
+        '- **Enter** — send · **Shift+Enter** — newline',
+      ].join('\n');
+      set(state => {
+        const chats = { ...state.chats };
+        const c = chats[chatId];
+        if (!c) return state;
+        chats[chatId] = {
+          ...c,
+          messages: [
+            ...c.messages,
+            { role: 'user', content: text, ts: Date.now() },
+            { role: 'assistant', content: helpText, ts: Date.now(), isHandoff: true },
+          ],
+        };
+        saveChats(chats, state.activeId);
+        return { chats };
+      });
+      return;
+    }
+    const modelMatch = /^\/model\s+(sonnet|opus)\b/i.exec(text);
+    if (modelMatch) {
+      const newModel = modelMatch[1].toLowerCase();
+      get().setModel(chatId, newModel);
+      set(state => {
+        const chats = { ...state.chats };
+        const c = chats[chatId];
+        if (!c) return state;
+        chats[chatId] = {
+          ...c,
+          messages: [
+            ...c.messages,
+            { role: 'user', content: text, ts: Date.now() },
+            {
+              role: 'assistant',
+              content: `Model switched to **${newModel}** for this chat. Future turns will use ${newModel === 'opus' ? 'Opus (with adaptive thinking)' : 'Sonnet'}.`,
+              ts: Date.now(),
+              isHandoff: true,
+            },
+          ],
+        };
+        saveChats(chats, state.activeId);
+        return { chats };
+      });
+      return;
+    }
+
     // Slash-command detection (must come BEFORE the chat turn flow so
     // we don't use up a chat session ID on commands that aren't chat).
     const slashMatch = /^\/(research|task)\s+([\s\S]+)$/i.exec(text);

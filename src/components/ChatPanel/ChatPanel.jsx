@@ -26,8 +26,12 @@ export default function ChatPanel() {
 
   const [input, setInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchMatch, setSearchMatch] = useState(0);
   const scrollRef = useRef(null);
   const textareaRef = useRef(null);
+  const searchInputRef = useRef(null);
 
   // File-mention autocomplete state.
   // When the user types `@` followed by a partial path, we show a
@@ -115,6 +119,37 @@ export default function ChatPanel() {
     window.addEventListener('hexis:focus-chat', onFocus);
     return () => window.removeEventListener('hexis:focus-chat', onFocus);
   }, []);
+
+  // Ctrl+F inside the chat panel → open search bar.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+        // Only if the focus is inside the chat panel
+        const focused = document.activeElement;
+        const inChat = focused?.closest?.('[data-hexis-chat-panel]');
+        if (inChat) {
+          e.preventDefault();
+          setSearchOpen(true);
+          setTimeout(() => searchInputRef.current?.focus(), 0);
+        }
+      }
+      if (e.key === 'Escape' && searchOpen) {
+        setSearchOpen(false);
+        setSearchQuery('');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [searchOpen]);
+
+  // Compute search matches from the messages list.
+  const searchMatches = useMemo(() => {
+    if (!searchOpen || !searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return messages
+      .map((m, i) => ({ i, m, hit: (m.content || '').toLowerCase().includes(q) }))
+      .filter(x => x.hit);
+  }, [searchOpen, searchQuery, messages]);
 
   const handleSubmit = (e) => {
     e?.preventDefault?.();
@@ -249,14 +284,17 @@ export default function ChatPanel() {
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      flex: 1,
-      minHeight: 0,
-      minWidth: 0,
-      background: W.bg1,
-      fontFamily: W.fontFamily,
-    }}>
+    <div
+      data-hexis-chat-panel
+      style={{
+        display: 'flex',
+        flex: 1,
+        minHeight: 0,
+        minWidth: 0,
+        background: W.bg1,
+        fontFamily: W.fontFamily,
+      }}
+    >
       {/* ─── Sidebar: chat list ─── */}
       {sidebarOpen && (
         <div style={{
@@ -482,6 +520,75 @@ export default function ChatPanel() {
           </button>
         </div>
 
+        {/* Search bar (Ctrl+F) */}
+        {searchOpen && (
+          <div style={{
+            flexShrink: 0,
+            padding: `${W.s2}px ${W.s3}px`,
+            background: W.bg2,
+            borderBottom: `1px solid ${W.border}`,
+            display: 'flex',
+            gap: W.s2,
+            alignItems: 'center',
+            fontSize: W.fontSm,
+          }}>
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setSearchMatch(0); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && searchMatches.length > 0) {
+                  e.preventDefault();
+                  const next = (searchMatch + 1) % searchMatches.length;
+                  setSearchMatch(next);
+                  // Scroll to that message — find its DOM node by data attr
+                  const idx = searchMatches[next].i;
+                  const el = document.querySelector(`[data-msg-idx="${idx}"]`);
+                  el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setSearchOpen(false);
+                  setSearchQuery('');
+                }
+              }}
+              placeholder="Find in chat — Enter: next match · Esc: close"
+              style={{
+                flex: 1,
+                padding: `${W.s1}px ${W.s2}px`,
+                background: W.bg1,
+                border: `1px solid ${W.border}`,
+                borderRadius: W.radius1,
+                color: W.text,
+                fontSize: W.fontSm,
+                fontFamily: W.fontFamily,
+                outline: 'none',
+              }}
+            />
+            <span style={{ color: W.textDim, whiteSpace: 'nowrap' }}>
+              {searchQuery.trim()
+                ? searchMatches.length > 0
+                  ? `${searchMatch + 1}/${searchMatches.length}`
+                  : '0/0'
+                : ''}
+            </span>
+            <button
+              onClick={() => { setSearchOpen(false); setSearchQuery(''); }}
+              style={{
+                padding: `${W.s1}px ${W.s2}px`,
+                background: 'transparent',
+                border: 'none',
+                color: W.textDim,
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Messages */}
         <div
           ref={scrollRef}
@@ -495,11 +602,22 @@ export default function ChatPanel() {
           {messages.length === 0 && !sending && (
             <EmptyState />
           )}
-          {messages.map((m, i) => (
-            <Message
+          {messages.map((m, i) => {
+            const q = searchOpen && searchQuery.trim() ? searchQuery.toLowerCase() : '';
+            const matches = q ? (m.content || '').toLowerCase().includes(q) : true;
+            return (
+            <div
               key={i}
+              data-msg-idx={i}
+              style={{
+                opacity: searchOpen && q ? (matches ? 1 : 0.3) : 1,
+                transition: 'opacity 120ms',
+              }}
+            >
+            <Message
               role={m.role}
               content={m.content}
+              ts={m.ts}
               tokens={m.tokens}
               tokensIn={m.tokensIn}
               tokensOut={m.tokensOut}
@@ -518,7 +636,9 @@ export default function ChatPanel() {
                   : null
               }
             />
-          ))}
+            </div>
+            );
+          })}
           {sending && (
             <Message
               role="assistant"
@@ -673,7 +793,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff }) {
+function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -694,6 +814,9 @@ function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost,
         <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: W.fontWeightSemi }}>
           {isUser ? 'You' : 'Assistant'}
         </span>
+        {ts && !streaming && (
+          <RelativeTime ts={ts} />
+        )}
         {streaming && !isEmptyStreaming && (
           <span style={{ color: W.accent }}>
             ● streaming
@@ -747,6 +870,16 @@ function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost,
       {!isUser && !streaming && fileChanges?.length > 0 && (
         <FileChangesRow files={fileChanges} />
       )}
+      {/* Message action bar: copy + regenerate on assistant messages,
+          copy-only on user messages. Hover-revealed so the quiet
+          mode stays clean. Skipped on streaming / handoff messages. */}
+      {!streaming && !isHandoff && (isUser || priorUserMessage) && content && (
+        <MessageActions
+          isUser={isUser}
+          content={content}
+          priorUserMessage={priorUserMessage}
+        />
+      )}
       {/* Deep review escalation: re-run the user's prompt through the
           full Writer/Planner/Coder/Critic pipeline when the chat
           answer looks promising but you want the 3-persona review
@@ -754,6 +887,74 @@ function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost,
           on the first message (no prior user turn to escalate). */}
       {!isUser && !streaming && !isHandoff && priorUserMessage && (
         <DeepReviewButton prompt={priorUserMessage} />
+      )}
+    </div>
+  );
+}
+
+function MessageActions({ isUser, content, priorUserMessage }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content || '');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {}
+  };
+  const handleRegenerate = async () => {
+    if (!priorUserMessage) return;
+    // Reuse the store's sendMessage — it will append a new user msg
+    // and run the turn fresh. We deliberately do NOT try to edit the
+    // previous response in place; keeping history linear is simpler
+    // and matches claude.ai.
+    const { useChatStore } = await import('../../stores/chatStore.js');
+    useChatStore.getState().sendMessage(priorUserMessage);
+  };
+  return (
+    <div style={{
+      marginTop: 2,
+      display: 'flex',
+      gap: W.s1,
+      alignItems: 'center',
+      opacity: 0.55,
+      transition: `opacity ${W.animFast}`,
+    }}
+      onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = 0.55; }}
+    >
+      <button
+        onClick={handleCopy}
+        title={copied ? 'Copied!' : 'Copy message'}
+        style={{
+          padding: '2px 8px',
+          background: 'transparent',
+          border: `1px solid ${W.border}`,
+          borderRadius: W.radius1,
+          color: copied ? W.accent : W.textDim,
+          fontSize: 11,
+          cursor: 'pointer',
+          fontFamily: W.fontFamily,
+        }}
+      >
+        {copied ? '✓ copied' : 'copy'}
+      </button>
+      {!isUser && priorUserMessage && (
+        <button
+          onClick={handleRegenerate}
+          title="Regenerate this response from the previous user message"
+          style={{
+            padding: '2px 8px',
+            background: 'transparent',
+            border: `1px solid ${W.border}`,
+            borderRadius: W.radius1,
+            color: W.textDim,
+            fontSize: 11,
+            cursor: 'pointer',
+            fontFamily: W.fontFamily,
+          }}
+        >
+          ↻ regenerate
+        </button>
       )}
     </div>
   );
@@ -974,8 +1175,11 @@ function Block({ block }) {
 // escalation routes without shouting — fades in when the user types
 // `/`, and always shows empty-state on an empty input.
 const SLASH_HINTS = [
-  { cmd: '/research', desc: 'deep research pipeline (plan → workers → critic → synth)' },
+  { cmd: '/research', desc: 'deep 6-phase research pipeline' },
   { cmd: '/task',     desc: 'full agent pipeline with Critic review' },
+  { cmd: '/clear',    desc: 'wipe this chat and start fresh' },
+  { cmd: '/model',    desc: 'switch model (sonnet | opus)' },
+  { cmd: '/help',     desc: 'show all commands and shortcuts' },
 ];
 
 function SlashHint({ input }) {
@@ -1129,6 +1333,39 @@ function MentionPopup({ matches, activeIdx, onPick, onHover }) {
       })}
     </div>
   );
+}
+
+// Relative-time badge — "just now", "3m ago", "2h ago", "yesterday".
+// Re-renders once a minute while mounted so old messages age
+// without needing a parent state push.
+function RelativeTime({ ts }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick(x => x + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const abs = new Date(ts);
+  return (
+    <span
+      style={{ color: W.textDim, fontSize: 11 }}
+      title={abs.toLocaleString()}
+    >
+      {formatRelative(ts)}
+    </span>
+  );
+}
+
+function formatRelative(ts) {
+  if (!ts) return '';
+  const now = Date.now();
+  const diff = Math.max(0, now - ts);
+  if (diff < 45_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
+  if (diff < 172_800_000) return 'yesterday';
+  const days = Math.round(diff / 86_400_000);
+  if (days < 30) return `${days}d ago`;
+  return new Date(ts).toLocaleDateString();
 }
 
 // Animated three-dot pulse, rendered while the agent is working but

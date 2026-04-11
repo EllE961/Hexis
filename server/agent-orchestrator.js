@@ -860,25 +860,28 @@ export async function warmupSdk(repoPath) {
   };
   const swallow = () => {};
   try {
-    // Race the warmup against a 6 s timeout — the warmup should take
-    // ~1-2 s, but if auth is borked or the network is slow, we don't
-    // want a hanging background promise keeping the process busy.
+    // CRITICAL: warmup must share the cache prefix with real chat
+    // turns for it to be useful. Use the SAME profile that chat uses
+    // (sonnet + CODER_TOOLS + lightweight) so the first real chat
+    // hits a warm cache. We also use a tiny prompt so the model
+    // call itself is cheap — the repo preamble is what matters for
+    // caching, not the user prompt.
+    const chatProfile = getProfile('chat');
     const warmup = runAgent({
-      prompt: 'ok',
+      prompt: 'ping',
       cwd: repoPath,
       systemPrompt: '',
-      tools: NO_TOOLS,
-      permissionMode: 'plan',
-      model: 'haiku',
-      effort: 'low',
+      tools: CODER_TOOLS,
+      permissionMode: 'bypassPermissions',
       maxTurns: 1,
-      lightweight: true,
       silent: true,
+      ...chatProfile,
     }, dummyTask, swallow, 'warmup');
 
-    const timeout = new Promise((resolve) => setTimeout(resolve, 6000));
+    const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
+    const t0 = Date.now();
     await Promise.race([warmup, timeout]);
-    console.log('[warmup] SDK prewarm done');
+    console.log(`[warmup] SDK prewarm done in ${Date.now() - t0} ms`);
   } catch (err) {
     // Swallow — this is a best-effort optimization, not a critical path
     console.log('[warmup] SDK prewarm skipped:', err?.message || err);
@@ -980,11 +983,16 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
     maxTurns: maxTurns || 100,
     env: cleanEnv(),
     includePartialMessages: true,
-    // Load CLAUDE.md / .claude/settings.json / AGENTS.md from the filesystem
-    settingSources: ['user', 'project', 'local'],
+    // Load CLAUDE.md / .claude/settings.json / AGENTS.md from the filesystem.
+    // Lightweight mode skips `user` and `local` scopes — chat turns only need
+    // the project-level conventions, and each extra scope adds filesystem
+    // reads that the SDK does on every query() call.
+    settingSources: lightweight ? ['project'] : ['user', 'project', 'local'],
     mcpServers,
-    // Free progress summaries via cached forks
-    agentProgressSummaries: true,
+    // Free progress summaries via cached forks — skip in lightweight mode
+    // since chat turns are one-shot and don't benefit from the summaries,
+    // and the feature spawns a background fork that adds setup cost.
+    agentProgressSummaries: !lightweight,
   };
   if (hooks) queryOpts.hooks = hooks;
 

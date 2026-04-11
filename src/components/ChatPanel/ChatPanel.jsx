@@ -675,6 +675,10 @@ export default function ChatPanel() {
           )}
         </div>
 
+        {/* Context budget warning — when the session is eating the
+            model window, suggest /compact. Non-blocking at 80%,
+            visually prominent at 90%. */}
+        <ContextBudgetWarning chat={chat} onCompact={() => sendMessage('/compact')} />
         {/* Command hint — faint row showing slash-command options
             when the user starts typing `/`, or on empty input. Fades
             away once they're typing a real message. */}
@@ -1350,35 +1354,121 @@ function DeepReviewButton({ prompt }) {
 }
 
 function FileChangesRow({ files }) {
+  const [expanded, setExpanded] = useState(null); // path or null
+  return (
+    <div style={{ marginTop: W.s1, maxWidth: '85%' }}>
+      <div style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: W.s1,
+        alignItems: 'center',
+      }}>
+        <span style={{
+          fontSize: W.fontSm,
+          color: W.textMuted,
+          marginRight: W.s2,
+        }}>
+          edited
+        </span>
+        {files.map((f, i) => (
+          <button
+            key={i}
+            onClick={() => setExpanded(expanded === f ? null : f)}
+            title="Click to view diff"
+            style={{
+              padding: `2px ${W.s2}px`,
+              background: expanded === f ? 'rgba(46, 160, 67, 0.18)' : 'rgba(46, 160, 67, 0.08)',
+              border: `1px solid rgba(46, 160, 67, ${expanded === f ? 0.6 : 0.35})`,
+              borderRadius: W.radius1,
+              fontSize: W.fontSm,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              color: '#4ade80',
+              cursor: 'pointer',
+            }}
+          >
+            {expanded === f ? '▾ ' : '▸ '}{f}
+          </button>
+        ))}
+      </div>
+      {expanded && (
+        <DiffPreview path={expanded} onClose={() => setExpanded(null)} />
+      )}
+    </div>
+  );
+}
+
+// Compact diff viewer. Fetches the working-tree diff for a file
+// and renders it as colorized + / - lines. Lazy — only runs when
+// the user expands a file pill in FileChangesRow.
+function DiffPreview({ path }) {
+  const [diff, setDiff] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    fetch(`/api/diff/file?path=${encodeURIComponent(path)}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => setDiff(d.diff || ''))
+      .catch(e => setErr(e.message));
+  }, [path]);
+  if (err) {
+    return (
+      <div style={{ marginTop: W.s1, fontSize: W.fontSm, color: W.red }}>
+        Error: {err}
+      </div>
+    );
+  }
+  if (diff === null) {
+    return (
+      <div style={{ marginTop: W.s1, fontSize: W.fontSm, color: W.textDim }}>
+        Loading diff…
+      </div>
+    );
+  }
+  if (!diff) {
+    return (
+      <div style={{ marginTop: W.s1, fontSize: W.fontSm, color: W.textDim }}>
+        (no uncommitted changes — file may already be staged or committed)
+      </div>
+    );
+  }
+  // Colorize + / - lines
+  const lines = diff.split(/\r?\n/);
   return (
     <div style={{
       marginTop: W.s1,
-      display: 'flex',
-      flexWrap: 'wrap',
-      gap: W.s1,
-      maxWidth: '85%',
-      alignItems: 'center',
+      background: 'rgba(0, 0, 0, 0.3)',
+      border: `1px solid ${W.border}`,
+      borderRadius: W.radius1,
+      padding: W.s2,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 11.5,
+      lineHeight: 1.45,
+      maxHeight: 360,
+      overflowY: 'auto',
+      overflowX: 'auto',
     }}>
-      <span style={{
-        fontSize: W.fontSm,
-        color: W.textMuted,
-        marginRight: W.s2,
-      }}>
-        edited
-      </span>
-      {files.map((f, i) => (
-        <span key={i} style={{
-          padding: `2px ${W.s2}px`,
-          background: 'rgba(46, 160, 67, 0.08)',
-          border: `1px solid rgba(46, 160, 67, 0.35)`,
-          borderRadius: W.radius1,
-          fontSize: W.fontSm,
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-          color: '#4ade80',
-        }}>
-          {f}
-        </span>
-      ))}
+      <pre style={{ margin: 0, whiteSpace: 'pre' }}>
+        {lines.map((line, i) => {
+          let color = W.text;
+          let bg = 'transparent';
+          if (line.startsWith('+') && !line.startsWith('+++')) {
+            color = '#4ade80';
+            bg = 'rgba(46, 160, 67, 0.08)';
+          } else if (line.startsWith('-') && !line.startsWith('---')) {
+            color = W.red;
+            bg = 'rgba(248, 81, 73, 0.08)';
+          } else if (line.startsWith('@@')) {
+            color = W.accent;
+          } else if (line.startsWith('diff ') || line.startsWith('index ') ||
+                     line.startsWith('+++') || line.startsWith('---')) {
+            color = W.textDim;
+          }
+          return (
+            <div key={i} style={{ color, background: bg, padding: '0 4px' }}>
+              {line || ' '}
+            </div>
+          );
+        })}
+      </pre>
     </div>
   );
 }
@@ -1694,6 +1784,64 @@ function MentionPopup({ matches, activeIdx, onPick, onHover }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Actionable warning above the chat input when session context
+// usage crosses 80% of the model window. Non-blocking at 80-89%,
+// red at 90%+. Clicking the button runs /compact which summarizes
+// older turns via Haiku and resets the session cache.
+function ContextBudgetWarning({ chat, onCompact }) {
+  if (!chat) return null;
+  const lastAssistant = [...(chat.messages || [])]
+    .reverse()
+    .find(m => m.role === 'assistant' && !m.isHandoff && (m.tokensIn || m.cachedRead));
+  if (!lastAssistant) return null;
+  const used = (lastAssistant.tokensIn || 0) + (lastAssistant.cachedRead || 0);
+  const maxWindow = 200_000;
+  const pct = Math.round((used / maxWindow) * 100);
+  if (pct < 80) return null;
+  const isCritical = pct >= 90;
+  return (
+    <div style={{
+      flexShrink: 0,
+      padding: `${W.s2}px ${W.s3}px`,
+      borderTop: `1px solid ${isCritical ? W.red : W.accent}`,
+      background: isCritical ? 'rgba(248, 81, 73, 0.08)' : W.accentBg,
+      display: 'flex',
+      alignItems: 'center',
+      gap: W.s3,
+      fontSize: W.fontSm,
+      color: W.text,
+    }}>
+      <span style={{ color: isCritical ? W.red : W.accent, fontWeight: W.fontWeightSemi }}>
+        {isCritical ? '⚠' : 'ⓘ'}
+      </span>
+      <span style={{ flex: 1 }}>
+        {isCritical
+          ? <>Context is <b>{pct}%</b> full ({fmtCount(used)} / {fmtCount(maxWindow)}). Next turn may get truncated. <b>Compact now.</b></>
+          : <>Context is <b>{pct}%</b> full ({fmtCount(used)} / {fmtCount(maxWindow)}). Consider compacting older turns to save tokens.</>
+        }
+      </span>
+      <button
+        type="button"
+        onClick={onCompact}
+        style={{
+          padding: `${W.s1}px ${W.s2}px`,
+          background: isCritical ? W.red : W.accent,
+          border: 'none',
+          borderRadius: W.radius1,
+          color: '#fff',
+          fontSize: W.fontSm,
+          fontWeight: W.fontWeightSemi,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          cursor: 'pointer',
+        }}
+        title="Run /compact to summarize older turns via Haiku"
+      >
+        /compact
+      </button>
     </div>
   );
 }

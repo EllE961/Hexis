@@ -1064,6 +1064,88 @@ app.get('/api/memory/learned', async (_req, res) => {
   }
 });
 
+// Auto-seed learned.md from CLAUDE.md / AGENTS.md / .claude/CLAUDE.md
+// when learned.md is empty. Extracts convention-like bullets
+// (lines starting with "- " or imperative verbs like "use", "don't",
+// "prefer", "always", "never") and appends them as scoped rules.
+// Idempotent: refuses to run if learned.md already has > 3 rules.
+app.post('/api/memory/seed', async (_req, res) => {
+  try {
+    const { readFile, writeFile, mkdir } = await import('fs/promises');
+    const memDir = resolve(REPO_PATH, '.hexis', 'memories');
+    const learnedPath = resolve(memDir, 'learned.md');
+
+    // Refuse if learned.md already has content
+    let existing = '';
+    try { existing = await readFile(learnedPath, 'utf-8'); } catch {}
+    const existingRules = existing.split(/\r?\n/).filter(l => /^\s*-\s+/.test(l));
+    if (existingRules.length > 3) {
+      return res.status(400).json({
+        error: `learned.md already has ${existingRules.length} rules — not seeding. Use /mem consolidate to reorganize instead.`,
+      });
+    }
+
+    // Find a source file
+    const candidates = ['CLAUDE.md', 'AGENTS.md', '.claude/CLAUDE.md'];
+    let srcPath = null;
+    let srcContent = '';
+    for (const name of candidates) {
+      try {
+        const p = resolve(REPO_PATH, name);
+        const c = await readFile(p, 'utf-8');
+        srcPath = name;
+        srcContent = c;
+        break;
+      } catch {}
+    }
+    if (!srcPath) {
+      return res.status(404).json({ error: 'No CLAUDE.md / AGENTS.md found to seed from' });
+    }
+
+    // Extract convention-like bullets
+    const imperative = /^(use|don't|do not|prefer|always|never|avoid|treat|ensure|make sure|check)/i;
+    const seeded = [];
+    for (const line of srcContent.split(/\r?\n/)) {
+      const bullet = /^\s*-\s+(.+)$/.exec(line);
+      if (bullet) {
+        const text = bullet[1].trim();
+        if (text.length > 10 && text.length < 280) seeded.push(text);
+        continue;
+      }
+      // Also catch imperative sentences outside bullets
+      const sentence = line.trim();
+      if (sentence.length > 15 && sentence.length < 280 && imperative.test(sentence)) {
+        seeded.push(sentence.replace(/[.!?]+$/, ''));
+      }
+    }
+
+    if (seeded.length === 0) {
+      return res.status(404).json({ error: `No convention-like statements found in ${srcPath}` });
+    }
+
+    // Cap at 30 rules so we don't flood with every bullet
+    const capped = seeded.slice(0, 30);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const block =
+      `## Learned\n\n` +
+      capped.map(r => `- ${r} _(seed from ${srcPath}, ${stamp})_`).join('\n') +
+      '\n';
+    const next = existing.trim() ? existing + '\n\n' + block : block;
+
+    await mkdir(memDir, { recursive: true });
+    await writeFile(learnedPath, next, 'utf-8');
+
+    res.json({
+      ok: true,
+      source: srcPath,
+      count: capped.length,
+      total_found: seeded.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Haiku-powered consolidation of learned.md:
 //   - Read the current file
 //   - Back it up to learned.YYYY-MM-DD.md.bak
@@ -1261,6 +1343,62 @@ function matchGlob(path, pattern) {
   );
   return re.test(path);
 }
+
+// Update a rule by matching its exact current text and replacing
+// it with new text. Body: { oldText, newText }. Safer than
+// index-based patching because learned.md is human-editable and
+// line numbers drift.
+app.patch('/api/memory/learned', async (req, res) => {
+  const { oldText, newText } = req.body || {};
+  if (!oldText || !newText) {
+    return res.status(400).json({ error: 'oldText and newText required' });
+  }
+  try {
+    const { readFile, writeFile } = await import('fs/promises');
+    const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
+    const content = await readFile(path, 'utf-8');
+    // Match a full bullet line containing oldText (case sensitive)
+    const lines = content.split(/\r?\n/);
+    let replaced = 0;
+    const next = lines.map(line => {
+      if (!replaced && /^\s*-\s+/.test(line) && line.includes(oldText)) {
+        replaced++;
+        return line.replace(oldText, newText);
+      }
+      return line;
+    }).join('\n');
+    if (!replaced) return res.status(404).json({ error: 'rule not found' });
+    await writeFile(path, next, 'utf-8');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a rule by matching its exact current text. Body: { text }.
+app.delete('/api/memory/learned', async (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: 'text required' });
+  try {
+    const { readFile, writeFile } = await import('fs/promises');
+    const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
+    const content = await readFile(path, 'utf-8');
+    const lines = content.split(/\r?\n/);
+    let deleted = 0;
+    const next = lines.filter(line => {
+      if (!deleted && /^\s*-\s+/.test(line) && line.includes(text)) {
+        deleted++;
+        return false;
+      }
+      return true;
+    }).join('\n');
+    if (!deleted) return res.status(404).json({ error: 'rule not found' });
+    await writeFile(path, next, 'utf-8');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Append a rule to .hexis/memories/learned.md. Used by the chat
 // "star to memory" button and future programmatic memory ops.

@@ -15,6 +15,27 @@
 import { useEffect, useState, useCallback } from 'react';
 import { W } from '../../theme/window-tokens.js';
 
+// Shared state/helpers for inline editing a rule. Lives at module
+// scope so LearnedRenderer and RuleItem can both see it without
+// prop-drilling.
+async function patchRule(oldText, newText) {
+  const res = await fetch('/api/memory/learned', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ oldText, newText }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+async function deleteRule(text) {
+  const res = await fetch('/api/memory/learned', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
 export default function MemoryPanel() {
   const [content, setContent] = useState('');
   const [exists, setExists] = useState(true);
@@ -107,23 +128,39 @@ export default function MemoryPanel() {
           </div>
         )}
         {!loading && !error && !exists && (
-          <EmptyState />
+          <EmptyState onSeeded={refresh} />
         )}
         {!loading && !error && exists && (
-          <LearnedRenderer content={content} />
+          <LearnedRenderer content={content} onRefresh={refresh} />
         )}
       </div>
     </div>
   );
 }
 
-function EmptyState() {
+function EmptyState({ onSeeded }) {
+  const [seedState, setSeedState] = useState('idle'); // idle | seeding | error
+  const [seedErr, setSeedErr] = useState(null);
+  const seed = async () => {
+    setSeedState('seeding');
+    setSeedErr(null);
+    try {
+      const res = await fetch('/api/memory/seed', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      setSeedState('idle');
+      await onSeeded?.();
+    } catch (err) {
+      setSeedState('error');
+      setSeedErr(err.message || String(err));
+    }
+  };
   return (
     <div style={{ color: W.textDim, lineHeight: 1.6 }}>
       <div style={{ fontSize: W.fontLg, color: W.textMuted, marginBottom: W.s2 }}>
         No learned conventions yet
       </div>
-      <div style={{ fontSize: W.fontMd }}>
+      <div style={{ fontSize: W.fontMd, marginBottom: W.s3 }}>
         Every time the full agent pipeline runs a review, the Final Reviewer
         appends 1–3 distilled rules to <code style={{
           fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
@@ -131,9 +168,34 @@ function EmptyState() {
         }}>.hexis/memories/learned.md</code>. Those rules get
         prepended to every future Planner run — that's the compounding
         quality loop.
-        <br /><br />
-        Run a task through <b>/task</b> or the <b>Deep review</b> button to
-        seed this file.
+      </div>
+      <div style={{ marginBottom: W.s3 }}>
+        <button
+          onClick={seed}
+          disabled={seedState === 'seeding'}
+          style={{
+            padding: `${W.s2}px ${W.s3}px`,
+            background: W.accentBg,
+            border: `1px solid ${W.accent}`,
+            borderRadius: W.radius1,
+            color: W.accent,
+            fontSize: W.fontMd,
+            fontFamily: W.fontFamily,
+            fontWeight: W.fontWeightSemi,
+            cursor: 'pointer',
+          }}
+        >
+          {seedState === 'seeding' ? 'Seeding…' : 'Seed from CLAUDE.md / AGENTS.md'}
+        </button>
+        {seedErr && (
+          <div style={{ marginTop: W.s1, fontSize: W.fontSm, color: W.red }}>
+            {seedErr}
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: W.fontSm, color: W.textDim }}>
+        You can also run <b>/task</b> or the <b>Deep review</b> button in chat
+        to seed this file from a Critic review.
       </div>
     </div>
   );
@@ -142,7 +204,7 @@ function EmptyState() {
 // Very lightweight markdown-ish renderer. Doesn't pull in a full MD lib
 // for this one panel — we parse the three things `learned.md` actually
 // uses: `##` h2 headings, `-` bullets, and inline `code` backticks.
-function LearnedRenderer({ content }) {
+function LearnedRenderer({ content, onRefresh }) {
   const lines = content.split(/\r?\n/);
   const blocks = [];
   let buf = [];
@@ -186,17 +248,7 @@ function LearnedRenderer({ content }) {
           );
         }
         if (b.kind === 'li') {
-          return (
-            <div key={i} style={{
-              display: 'flex',
-              gap: W.s2,
-              marginBottom: W.s1,
-              alignItems: 'flex-start',
-            }}>
-              <span style={{ color: W.accent, flexShrink: 0 }}>•</span>
-              <span style={{ flex: 1 }}>{renderInline(b.text)}</span>
-            </div>
-          );
+          return <RuleItem key={i} text={b.text} onChanged={onRefresh} />;
         }
         return (
           <p key={i} style={{ margin: `${W.s2}px 0`, color: W.textMuted }}>
@@ -204,6 +256,162 @@ function LearnedRenderer({ content }) {
           </p>
         );
       })}
+    </div>
+  );
+}
+
+// Individual rule with hover-revealed edit + delete actions.
+// Click edit → becomes a textarea inline, Enter saves, Esc cancels.
+// Click delete → confirmation prompt then DELETE request.
+function RuleItem({ text, onChanged }) {
+  const [mode, setMode] = useState('view'); // view | edit | saving
+  const [draft, setDraft] = useState(text);
+  const [hover, setHover] = useState(false);
+
+  const save = async () => {
+    const next = draft.trim();
+    if (!next || next === text) {
+      setMode('view');
+      return;
+    }
+    setMode('saving');
+    try {
+      await patchRule(text, next);
+      await onChanged?.();
+      setMode('view');
+    } catch {
+      setMode('edit');
+    }
+  };
+
+  const remove = async () => {
+    if (!confirm('Delete this rule?')) return;
+    try {
+      await deleteRule(text);
+      await onChanged?.();
+    } catch { /* ignore */ }
+  };
+
+  if (mode === 'edit' || mode === 'saving') {
+    return (
+      <div style={{
+        display: 'flex',
+        gap: W.s2,
+        marginBottom: W.s2,
+        alignItems: 'flex-start',
+        padding: W.s2,
+        background: W.bg2,
+        border: `1px solid ${W.accent}`,
+        borderRadius: W.radius1,
+      }}>
+        <textarea
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
+            if (e.key === 'Escape') { e.preventDefault(); setDraft(text); setMode('view'); }
+          }}
+          rows={2}
+          disabled={mode === 'saving'}
+          style={{
+            flex: 1,
+            background: W.bg1,
+            border: `1px solid ${W.border}`,
+            borderRadius: W.radius1,
+            color: W.text,
+            fontSize: W.fontMd,
+            fontFamily: W.fontFamily,
+            padding: `${W.s1}px ${W.s2}px`,
+            outline: 'none',
+            resize: 'vertical',
+          }}
+        />
+        <button
+          onClick={save}
+          disabled={mode === 'saving'}
+          style={{
+            padding: `${W.s1}px ${W.s2}px`,
+            background: W.accentBg,
+            border: `1px solid ${W.accent}`,
+            borderRadius: W.radius1,
+            color: W.accent,
+            fontSize: W.fontSm,
+            cursor: 'pointer',
+          }}
+        >
+          {mode === 'saving' ? 'saving…' : 'save'}
+        </button>
+        <button
+          onClick={() => { setDraft(text); setMode('view'); }}
+          style={{
+            padding: `${W.s1}px ${W.s2}px`,
+            background: 'transparent',
+            border: `1px solid ${W.border}`,
+            borderRadius: W.radius1,
+            color: W.textDim,
+            fontSize: W.fontSm,
+            cursor: 'pointer',
+          }}
+        >
+          cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: 'flex',
+        gap: W.s2,
+        marginBottom: W.s1,
+        alignItems: 'flex-start',
+        padding: `${W.s1}px ${W.s1}px`,
+        borderRadius: W.radius1,
+        background: hover ? 'rgba(255, 255, 255, 0.02)' : 'transparent',
+      }}
+    >
+      <span style={{ color: W.accent, flexShrink: 0 }}>•</span>
+      <span style={{ flex: 1 }}>{renderInline(text)}</span>
+      {hover && (
+        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+          <button
+            onClick={() => setMode('edit')}
+            title="Edit rule"
+            style={{
+              padding: '1px 6px',
+              background: 'transparent',
+              border: `1px solid ${W.border}`,
+              borderRadius: 3,
+              color: W.textDim,
+              fontSize: 10,
+              cursor: 'pointer',
+            }}
+          >
+            edit
+          </button>
+          <button
+            onClick={remove}
+            title="Delete rule"
+            style={{
+              padding: '1px 6px',
+              background: 'transparent',
+              border: `1px solid ${W.border}`,
+              borderRadius: 3,
+              color: W.textDim,
+              fontSize: 10,
+              cursor: 'pointer',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = W.red; e.currentTarget.style.borderColor = W.red; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = W.textDim; e.currentTarget.style.borderColor = W.border; }}
+          >
+            delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

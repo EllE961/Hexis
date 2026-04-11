@@ -402,6 +402,7 @@ export default function App() {
       case 'view:search':          togglePanel('search'); break;
       case 'view:git':             togglePanel('git'); break;
       case 'view:ai':              togglePanel('ai'); break;
+      case 'view:chat':            togglePanel('chat'); break;
       case 'view:bookmarks':       togglePanel('bookmarks'); break;
       case 'view:history':         togglePanel('history'); break;
       case 'view:terminal':        togglePanel('terminal'); break;
@@ -566,6 +567,7 @@ export default function App() {
         { id: 'view:outline', label: 'Outline', shortcut: 'Ctrl+Shift+O', mnemonic: 'O', checked: panels.editor?.visible },
         { id: 'view:search', label: 'Search', shortcut: 'Ctrl+Shift+F', mnemonic: 'S', checked: panels.search?.visible },
         { id: 'view:git', label: 'Source Control', shortcut: 'Ctrl+G', mnemonic: 'G', checked: panels.git?.visible },
+        { id: 'view:chat', label: 'Chat', shortcut: 'Ctrl+Shift+C', mnemonic: 'C', checked: panels.chat?.visible },
         { id: 'view:ai', label: 'AI Agents', shortcut: 'Ctrl+I', mnemonic: 'A', checked: panels.ai?.visible },
         { id: 'view:bookmarks', label: 'Bookmarks', mnemonic: 'B', checked: panels.bookmarks?.visible },
         { id: 'view:history', label: 'Local History', mnemonic: 'H', checked: panels.history?.visible },
@@ -1605,6 +1607,15 @@ export default function App() {
         usePanelStore.getState().showPanel('editor');
         window.dispatchEvent(new Event('hexis:toggle-explorer'));
       }
+      // Ctrl+Shift+C: toggle Chat panel
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          togglePanel('chat');
+        }
+      }
       // Ctrl+O: open folder (native picker) — only when the editor isn't focused
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'o' || e.key === 'O')) {
         const editorFocused = document.activeElement?.closest?.('.cm-editor');
@@ -1854,6 +1865,20 @@ export default function App() {
       >
         <span style={{ color: W.textDim }}>⬡ Hexis</span>
 
+        {/* Chat panel toggle */}
+        <button
+          className="flex items-center gap-1.5 px-2 py-0.5 rounded"
+          style={{
+            color: panels.chat?.visible ? W.accent : W.textDim,
+            background: panels.chat?.visible ? W.accentSoft : 'transparent',
+          }}
+          onClick={() => togglePanel('chat')}
+          title="Toggle Chat (Ctrl+Shift+C)"
+        >
+          <Icon name="comment-discussion" size={W.iconSm} color="inherit" />
+          <span style={{ fontWeight: 500 }}>Chat</span>
+        </button>
+
         {/* AI panel toggle */}
         <button
           className="flex items-center gap-1.5 px-2 py-0.5 rounded"
@@ -1862,8 +1887,9 @@ export default function App() {
             background: panels.ai?.visible ? W.accentSoft : 'transparent',
           }}
           onClick={() => togglePanel('ai')}
+          title="Toggle AI Agents (Ctrl+I)"
         >
-          <span>🐝</span>
+          <Icon name="hubot" size={W.iconSm} color="inherit" />
           <span style={{ fontWeight: 500 }}>AI</span>
           {activeAgentTask && !['done', 'error', 'cancelled'].includes(activeAgentTask.status) && (
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: W.accent, animation: 'pulse 1.5s infinite' }} />
@@ -1878,8 +1904,9 @@ export default function App() {
             background: panels.git?.visible ? W.accentSoft : 'transparent',
           }}
           onClick={() => togglePanel('git')}
+          title="Toggle Source Control (Ctrl+G)"
         >
-          <span>⎇</span>
+          <Icon name="git-branch" size={W.iconSm} color="inherit" />
           <span style={{ fontWeight: 500 }}>{currentBranch}</span>
           {changedCount > 0 && (
             <span className="px-1.5 rounded-full text-[10px] font-medium"

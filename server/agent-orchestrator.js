@@ -1345,7 +1345,7 @@ Protected files are enforced by a pre-tool hook — if you try to edit a lockfil
       result: {
         approved: true,
         confidence: 0.9,
-        summary: `Auto-approved: classified as trivial_edit (${allTouchedFiles.length} file${allTouchedFiles.length === 1 ? '' : 's'} touched). Full persona review skipped to save cost.`,
+        summary: `Auto-approved: classified as trivial_edit (${allTouchedFiles.size} file${allTouchedFiles.size === 1 ? '' : 's'} touched). Full persona review skipped to save cost.`,
         issues: [],
         skipped: true,
       },

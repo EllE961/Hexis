@@ -29,6 +29,20 @@ export default function ChatPanel() {
   const scrollRef = useRef(null);
   const textareaRef = useRef(null);
 
+  // File-mention autocomplete state.
+  // When the user types `@` followed by a partial path, we show a
+  // popup of matching project files. Fetched lazily on first open
+  // and cached for the session. Keyboard-navigable with ↑/↓/Enter.
+  const [fileList, setFileList] = useState([]);
+  const [mention, setMention] = useState(null); // { query, startIdx, activeIdx }
+  useEffect(() => {
+    if (fileList.length > 0) return;
+    fetch('/api/graph')
+      .then(r => r.json())
+      .then(d => setFileList((d.nodes || []).map(n => n.id).filter(Boolean)))
+      .catch(() => {});
+  }, [fileList.length]);
+
   const chat = chats[activeId];
   const messages = chat?.messages || [];
   // Per-chat transient state — each chat has its own sending/streamBuffer/error
@@ -107,14 +121,130 @@ export default function ChatPanel() {
     if (!input.trim() || sending) return;
     const text = input;
     setInput('');
+    // Reset history cursor so the next ↑ starts from the most recent
+    historyIdxRef.current = -1;
     sendMessage(text);
   };
 
+  // Terminal-style command history: ↑/↓ walk through previous user
+  // messages in this chat. -1 = "not browsing history, input is the
+  // user's live draft". 0 = most recent user message.
+  const historyIdxRef = useRef(-1);
+  const draftBeforeHistoryRef = useRef('');
+
+  // Filter file list by mention query — simple substring match,
+  // ranks prefix hits first, cap at 8 results.
+  const mentionMatches = useMemo(() => {
+    if (!mention) return [];
+    const q = (mention.query || '').toLowerCase();
+    if (!q) return fileList.slice(0, 8);
+    const prefix = [];
+    const sub = [];
+    for (const path of fileList) {
+      const p = path.toLowerCase();
+      if (p.startsWith(q)) prefix.push(path);
+      else if (p.includes(q)) sub.push(path);
+      if (prefix.length >= 8) break;
+    }
+    return [...prefix, ...sub].slice(0, 8);
+  }, [mention, fileList]);
+
+  // Commit a selected mention: replace `@query` at startIdx with
+  // `@filePath ` (trailing space so the user can keep typing).
+  const commitMention = (path) => {
+    if (!mention) return;
+    const before = input.slice(0, mention.startIdx);
+    const after = input.slice(mention.startIdx + 1 + (mention.query?.length || 0));
+    const next = `${before}@${path} ${after}`;
+    setInput(next);
+    setMention(null);
+    // Restore caret position
+    setTimeout(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      const pos = (before + '@' + path + ' ').length;
+      ta.selectionStart = ta.selectionEnd = pos;
+      ta.focus();
+    }, 0);
+  };
+
   const handleKey = (e) => {
+    // If the mention popup is open, ↑/↓/Enter/Tab/Escape belong to it first
+    if (mention && mentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMention({ ...mention, activeIdx: (mention.activeIdx + 1) % mentionMatches.length });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMention({
+          ...mention,
+          activeIdx: (mention.activeIdx - 1 + mentionMatches.length) % mentionMatches.length,
+        });
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        commitMention(mentionMatches[mention.activeIdx] || mentionMatches[0]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
+
     // Enter sends, Shift+Enter adds newline
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit(e);
+      return;
+    }
+    // ↑ / ↓ walk command history — only when the textarea caret is
+    // at the very start/end (multi-line drafts still get free arrow
+    // navigation).
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const userHistory = messages.filter(m => m.role === 'user').map(m => m.content);
+    if (userHistory.length === 0) return;
+
+    if (e.key === 'ArrowUp') {
+      const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+      const multilineCaretMid = input.includes('\n') && !atStart;
+      if (multilineCaretMid) return;
+      e.preventDefault();
+      if (historyIdxRef.current === -1) {
+        draftBeforeHistoryRef.current = input;
+        historyIdxRef.current = 0;
+      } else if (historyIdxRef.current < userHistory.length - 1) {
+        historyIdxRef.current++;
+      }
+      const idx = userHistory.length - 1 - historyIdxRef.current;
+      setInput(userHistory[idx]);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      if (historyIdxRef.current === -1) return; // not in history mode
+      const atEnd = ta.selectionStart === input.length && ta.selectionEnd === input.length;
+      if (!atEnd && input.includes('\n')) return;
+      e.preventDefault();
+      if (historyIdxRef.current > 0) {
+        historyIdxRef.current--;
+        const idx = userHistory.length - 1 - historyIdxRef.current;
+        setInput(userHistory[idx]);
+      } else {
+        historyIdxRef.current = -1;
+        setInput(draftBeforeHistoryRef.current);
+        draftBeforeHistoryRef.current = '';
+      }
+      return;
+    }
+    // Any other key exits history mode — we're back to live typing
+    if (historyIdxRef.current !== -1 && e.key.length === 1) {
+      historyIdxRef.current = -1;
+      draftBeforeHistoryRef.current = '';
     }
   };
 
@@ -419,6 +549,15 @@ export default function ChatPanel() {
             high-complexity keywords, gently suggest `/task` instead
             of a chat turn. Non-blocking: user can still hit Enter. */}
         <EscalationHint input={input} onUseTask={() => setInput('/task ' + input.trim())} />
+        {/* @file mention autocomplete popup */}
+        {mention && mentionMatches.length > 0 && (
+          <MentionPopup
+            matches={mentionMatches}
+            activeIdx={mention.activeIdx}
+            onPick={commitMention}
+            onHover={(i) => setMention((m) => m ? { ...m, activeIdx: i } : m)}
+          />
+        )}
 
         {/* Input */}
         <form
@@ -443,9 +582,24 @@ export default function ChatPanel() {
             <textarea
               ref={textareaRef}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => {
+                const v = e.target.value;
+                setInput(v);
+                // Detect `@query` at the caret position. If the char
+                // before the caret is part of an `@word` token (no
+                // whitespace), open the mention popup and filter by
+                // the query.
+                const caret = e.target.selectionStart ?? v.length;
+                const upto = v.slice(0, caret);
+                const m = /@([^\s@]*)$/.exec(upto);
+                if (m) {
+                  setMention({ query: m[1], startIdx: m.index, activeIdx: 0 });
+                } else if (mention) {
+                  setMention(null);
+                }
+              }}
               onKeyDown={handleKey}
-              placeholder={sending ? 'Sending…' : 'Ask anything about the project — Enter to send, Shift+Enter for newline'}
+              placeholder={sending ? 'Sending…' : 'Ask anything — @file to reference · Enter to send · Shift+Enter for newline · ↑/↓ recall history'}
               rows={1}
               disabled={sending}
               style={{
@@ -774,7 +928,7 @@ function AssistantBlocks({ content }) {
 
 function Block({ block }) {
   if (block.kind === 'text') {
-    return <span style={{ whiteSpace: 'pre-wrap' }}>{block.value}</span>;
+    return <Markdown text={block.value} />;
   }
   // Tool / bash / search / grep / meta — render as a compact pill
   const isMeta = block.kind === 'meta';
@@ -919,6 +1073,64 @@ function EscalationHint({ input, onUseTask }) {
   );
 }
 
+// @file mention autocomplete popup. Appears above the textarea when
+// the user types `@` followed by a partial path. Keyboard: ↑/↓ to
+// navigate, Enter/Tab to commit, Esc to dismiss.
+function MentionPopup({ matches, activeIdx, onPick, onHover }) {
+  return (
+    <div style={{
+      flexShrink: 0,
+      borderTop: `1px solid ${W.border}`,
+      background: W.bg2,
+      maxHeight: 220,
+      overflowY: 'auto',
+      fontSize: W.fontSm,
+    }}>
+      <div style={{
+        padding: `${W.s1}px ${W.s3}px`,
+        color: W.textDim,
+        fontSize: 11,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+      }}>
+        File reference · ↑↓ Enter · Esc
+      </div>
+      {matches.map((path, i) => {
+        const isActive = i === activeIdx;
+        const parts = path.split('/');
+        const name = parts[parts.length - 1];
+        const dir = parts.slice(0, -1).join('/');
+        return (
+          <div
+            key={path}
+            onMouseEnter={() => onHover?.(i)}
+            onMouseDown={(e) => { e.preventDefault(); onPick(path); }}
+            style={{
+              padding: `${W.s1}px ${W.s3}px`,
+              cursor: 'pointer',
+              background: isActive ? W.accentBg : 'transparent',
+              borderLeft: `2px solid ${isActive ? W.accent : 'transparent'}`,
+              display: 'flex',
+              gap: W.s2,
+              alignItems: 'baseline',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            }}
+          >
+            <span style={{ color: isActive ? W.accent : W.text, fontWeight: isActive ? W.fontWeightSemi : 400 }}>
+              {name}
+            </span>
+            {dir && (
+              <span style={{ color: W.textDim, fontSize: 11 }}>
+                {dir}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Animated three-dot pulse, rendered while the agent is working but
 // hasn't produced any tokens yet. Kills the "did it work?" dead gap.
 function ThinkingDots() {
@@ -947,6 +1159,259 @@ function ThinkingDots() {
 }
 
 // ─── Empty state ───
+
+// ─── Markdown renderer ───
+//
+// Intentionally lightweight — handles the Markdown features the
+// Claude chat model actually emits: fenced code blocks, headings,
+// bullets, numbered lists, bold, italic, inline code, and plain
+// paragraphs. No link rendering (rare in code-assistant output)
+// and no tables (also rare). Keeps the bundle small and the
+// streaming render cheap.
+//
+// Fenced code blocks render with a language label and a copy
+// button. Inline code renders as a tinted monospace span. Text
+// paragraphs preserve `pre-wrap` so the agent's manual line
+// breaks survive.
+function Markdown({ text }) {
+  const nodes = useMemo(() => parseMarkdown(text || ''), [text]);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {nodes.map((n, i) => renderNode(n, i))}
+    </div>
+  );
+}
+
+// Parse into a flat list of block nodes:
+//   { kind: 'code', lang, body }
+//   { kind: 'h', depth, text }
+//   { kind: 'li', ordered, text }
+//   { kind: 'p', text }
+function parseMarkdown(src) {
+  const nodes = [];
+  const lines = src.split(/\r?\n/);
+  let i = 0;
+  let buf = [];
+  const flushPara = () => {
+    if (buf.length) {
+      const joined = buf.join('\n');
+      if (joined.trim()) nodes.push({ kind: 'p', text: joined });
+      buf = [];
+    }
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    // Fenced code block
+    const fence = /^```\s*([a-zA-Z0-9_+.-]*)\s*$/.exec(line);
+    if (fence) {
+      flushPara();
+      const lang = fence[1] || '';
+      const body = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        body.push(lines[i]);
+        i++;
+      }
+      // skip closing ```
+      if (i < lines.length) i++;
+      nodes.push({ kind: 'code', lang, body: body.join('\n') });
+      continue;
+    }
+    // Heading
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) {
+      flushPara();
+      nodes.push({ kind: 'h', depth: h[1].length, text: h[2] });
+      i++;
+      continue;
+    }
+    // Bulleted list item
+    const ul = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (ul) {
+      flushPara();
+      nodes.push({ kind: 'li', ordered: false, text: ul[1] });
+      i++;
+      continue;
+    }
+    // Numbered list item
+    const ol = /^\s*(\d+)\.\s+(.*)$/.exec(line);
+    if (ol) {
+      flushPara();
+      nodes.push({ kind: 'li', ordered: true, num: ol[1], text: ol[2] });
+      i++;
+      continue;
+    }
+    // Blank line ends a paragraph
+    if (line.trim() === '') {
+      flushPara();
+      i++;
+      continue;
+    }
+    // Otherwise append to current paragraph buffer
+    buf.push(line);
+    i++;
+  }
+  flushPara();
+  return nodes;
+}
+
+function renderNode(n, key) {
+  if (n.kind === 'code') {
+    return <CodeBlock key={key} lang={n.lang} body={n.body} />;
+  }
+  if (n.kind === 'h') {
+    const size = n.depth === 1 ? 20 : n.depth === 2 ? 17 : n.depth === 3 ? 15 : 14;
+    return (
+      <div key={key} style={{
+        fontSize: size,
+        fontWeight: W.fontWeightSemi,
+        color: n.depth <= 2 ? W.text : W.textMuted,
+        marginTop: key === 0 ? 0 : 10,
+        marginBottom: 4,
+      }}>
+        {renderInlineMd(n.text)}
+      </div>
+    );
+  }
+  if (n.kind === 'li') {
+    return (
+      <div key={key} style={{
+        display: 'flex',
+        gap: W.s2,
+        alignItems: 'flex-start',
+        paddingLeft: W.s2,
+      }}>
+        <span style={{
+          color: W.accent,
+          flexShrink: 0,
+          fontFamily: n.ordered ? W.fontFamily : 'inherit',
+          minWidth: n.ordered ? 18 : 8,
+        }}>
+          {n.ordered ? `${n.num}.` : '•'}
+        </span>
+        <span style={{ flex: 1, whiteSpace: 'pre-wrap' }}>{renderInlineMd(n.text)}</span>
+      </div>
+    );
+  }
+  // Paragraph
+  return (
+    <div key={key} style={{ whiteSpace: 'pre-wrap' }}>
+      {renderInlineMd(n.text)}
+    </div>
+  );
+}
+
+// Inline markdown: `code`, **bold**, *italic*. Tokenized via a
+// single regex walk so we don't pay N-pass splitting per render.
+function renderInlineMd(text) {
+  if (!text) return null;
+  // Pattern order: `code` > **bold** > *italic*
+  const parts = [];
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\n]+\*)/g;
+  let lastIdx = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > lastIdx) parts.push({ kind: 'text', value: text.slice(lastIdx, m.index) });
+    const tok = m[0];
+    if (tok.startsWith('`')) {
+      parts.push({ kind: 'code', value: tok.slice(1, -1) });
+    } else if (tok.startsWith('**')) {
+      parts.push({ kind: 'bold', value: tok.slice(2, -2) });
+    } else if (tok.startsWith('*')) {
+      parts.push({ kind: 'em', value: tok.slice(1, -1) });
+    }
+    lastIdx = m.index + tok.length;
+  }
+  if (lastIdx < text.length) parts.push({ kind: 'text', value: text.slice(lastIdx) });
+  return parts.map((p, i) => {
+    if (p.kind === 'code') {
+      return (
+        <code key={i} style={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: '0.92em',
+          padding: '1px 5px',
+          background: 'rgba(240, 160, 48, 0.10)',
+          border: `1px solid rgba(240, 160, 48, 0.25)`,
+          borderRadius: 3,
+          color: W.accent,
+        }}>
+          {p.value}
+        </code>
+      );
+    }
+    if (p.kind === 'bold') return <strong key={i}>{p.value}</strong>;
+    if (p.kind === 'em') return <em key={i}>{p.value}</em>;
+    return <span key={i}>{p.value}</span>;
+  });
+}
+
+// Fenced code block with language label + copy button. Mimics
+// Claude Code / claude.ai: rounded dark block, header row, code.
+function CodeBlock({ lang, body }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+  return (
+    <div style={{
+      margin: '6px 0',
+      borderRadius: 6,
+      background: 'rgba(0, 0, 0, 0.35)',
+      border: `1px solid ${W.border}`,
+      overflow: 'hidden',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 12.5,
+    }}>
+      <div style={{
+        padding: '4px 10px',
+        background: 'rgba(255, 255, 255, 0.03)',
+        borderBottom: `1px solid ${W.border}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        fontSize: 11,
+        color: W.textDim,
+      }}>
+        <span style={{
+          textTransform: 'lowercase',
+          letterSpacing: '0.02em',
+          fontFamily: W.fontFamily,
+        }}>
+          {lang || 'code'}
+        </span>
+        <button
+          onClick={handleCopy}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: copied ? W.accent : W.textDim,
+            fontSize: 11,
+            cursor: 'pointer',
+            padding: '2px 6px',
+            borderRadius: 3,
+            fontFamily: W.fontFamily,
+          }}
+        >
+          {copied ? '✓ copied' : 'copy'}
+        </button>
+      </div>
+      <pre style={{
+        margin: 0,
+        padding: 10,
+        overflowX: 'auto',
+        color: W.text,
+        whiteSpace: 'pre',
+        lineHeight: 1.5,
+      }}>
+        {body}
+      </pre>
+    </div>
+  );
+}
 
 function EmptyState() {
   // Starter prompt suggestions — tiny buttons under the hero that

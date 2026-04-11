@@ -9,6 +9,13 @@ import { create } from 'zustand';
 
 const STORAGE_KEY = 'hexis-panel-layout';
 
+// Bump this number whenever DEFAULTS changes in a way that would
+// break old persisted layouts (adding a panel, renaming one, changing
+// a field shape). On load, if the saved `version` is older, the
+// layout gets healed via the migration chain in `initPanels`. Old
+// raw-dict layouts (pre-versioning) get wrapped transparently.
+const LAYOUT_VERSION = 2;
+
 const DEFAULTS = {
   // The editor docks to the LEFT now; the hex grid fills the remaining
   // center area. This matches VS Code's muscle memory and lets the
@@ -29,11 +36,24 @@ const DEFAULTS = {
   taskboard: { mode: 'floating', dock: null,   width: 1050, height: 650, x: 'center', y: 'center', visible: false, zIndex: 30, order: 0, minWidth: 600, minHeight: 400, maximized: false, preMaxState: null, edgeCollapsed: false },
 };
 
+// Load + unwrap the persisted layout. Handles three cases:
+//   1. Envelope format `{version, layout}` — the current format
+//   2. Raw dict (pre-version 2) — wrapped into envelope with version 1
+//   3. Missing / malformed — returns null so initPanels uses defaults
+// Returns `{ version, layout }` where layout is the panel dict.
 function loadLayout() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.layout && typeof parsed.version === 'number') {
+      return parsed;
+    }
+    // Legacy: raw dict of panel entries. Treat as version 1.
+    if (parsed && typeof parsed === 'object') {
+      return { version: 1, layout: parsed };
+    }
+    return null;
   } catch { return null; }
 }
 
@@ -53,28 +73,45 @@ function saveLayout(panels) {
         visible: effective.visible, order: effective.order,
       };
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      version: LAYOUT_VERSION,
+      layout: slim,
+    }));
   } catch { /* ignore */ }
 }
 
-function initPanels() {
-  const saved = loadLayout();
-
-  // One-shot migration: the editor used to dock RIGHT and the explorer
-  // was a standalone left panel. The new layout puts the editor on the
-  // LEFT (with the embedded explorer sidebar inside) and drops the
-  // stand-alone `explorer` panel. Heal both on first load after upgrade.
-  const MIGRATION_KEY = 'hexis-editor-migrated-to-left';
-  let didMigrate = false;
-  try { didMigrate = localStorage.getItem(MIGRATION_KEY) === '1'; } catch {}
-  if (!didMigrate && saved) {
-    if (saved.editor && saved.editor.dock === 'right') {
-      saved.editor = { ...saved.editor, dock: 'left', order: 0 };
+// Migration chain: each entry takes an old-version layout dict and
+// returns the next-version layout dict. Runs in order until we reach
+// LAYOUT_VERSION. Add new migrations here whenever DEFAULTS changes
+// in a breaking way.
+const MIGRATIONS = {
+  // v1 → v2: editor used to dock RIGHT and there was a standalone
+  // `explorer` panel. v2 puts editor on the LEFT with embedded
+  // explorer sidebar and drops the standalone panel.
+  1: (layout) => {
+    const next = { ...layout };
+    if (next.editor && next.editor.dock === 'right') {
+      next.editor = { ...next.editor, dock: 'left', order: 0 };
     }
-    // Drop stale `explorer` entry — it lives inside the editor now
-    if (saved.explorer) delete saved.explorer;
-    try { localStorage.setItem(MIGRATION_KEY, '1'); } catch {}
+    if (next.explorer) delete next.explorer;
+    return next;
+  },
+};
+
+function migrateLayout(saved) {
+  if (!saved) return null;
+  let layout = saved.layout;
+  let version = saved.version || 1;
+  while (version < LAYOUT_VERSION && MIGRATIONS[version]) {
+    layout = MIGRATIONS[version](layout);
+    version++;
   }
+  return layout;
+}
+
+function initPanels() {
+  const savedEnvelope = loadLayout();
+  const saved = migrateLayout(savedEnvelope);
 
   const panels = {};
   for (const [id, def] of Object.entries(DEFAULTS)) {

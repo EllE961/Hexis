@@ -1666,6 +1666,26 @@ export default function App() {
           }, 0);
         }
       }
+      // Escape → focus chat. The "panic button" — wherever you are,
+      // if something's stuck, Esc pulls you back to the chat prompt.
+      // Skipped if a modal, command palette, or native dialog is open
+      // (Esc is the standard dismiss for those, let them handle it).
+      if (e.key === 'Escape') {
+        const modalOpen = document.querySelector('[role="dialog"], .cmd-palette-open');
+        const cmModeActive = document.activeElement?.closest?.('.cm-editor');
+        if (modalOpen || cmModeActive) return;
+        const inputTag = document.activeElement?.tagName;
+        if (inputTag === 'INPUT' || inputTag === 'TEXTAREA') {
+          // If they're already in a text input, Esc blurs it first so
+          // Ctrl+anything can land (and a second Esc reveals chat).
+          document.activeElement.blur();
+          return;
+        }
+        usePanelStore.getState().revealPanel('chat');
+        setTimeout(() => {
+          window.dispatchEvent(new Event('hexis:focus-chat'));
+        }, 0);
+      }
       // Ctrl+O: open folder (native picker) — only when the editor isn't focused
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'o' || e.key === 'O')) {
         const editorFocused = document.activeElement?.closest?.('.cm-editor');
@@ -2083,6 +2103,42 @@ export default function App() {
             {selectedCell}
           </span>
         )}
+        {/* Reset UI — recovery button for corrupted layouts. Nukes
+            every `hexis-*` localStorage key and reloads. Costs the
+            user their chat history + panel layout but gets them
+            unstuck without opening DevTools. Confirm modal guards
+            against accidental clicks. */}
+        <button
+          className={selectedCell ? '' : 'ml-auto'}
+          style={{
+            padding: '2px 8px',
+            borderRadius: 4,
+            color: W.textDim,
+            fontSize: 11,
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            background: 'transparent',
+            border: '1px solid transparent',
+          }}
+          title="Reset the entire UI layout + chat history. Use this if panels are corrupted or off-screen."
+          onClick={() => {
+            setConfirmModal({
+              title: 'Reset UI layout?',
+              message: 'This wipes the panel layout, chat history, recent tasks, and any other UI state stored in this browser. The project files on disk are untouched. Use this when panels are stuck off-screen or Hexis is acting weird.',
+              destructive: true,
+              confirmLabel: 'Reset everything',
+              onConfirm: () => {
+                try {
+                  const keys = Object.keys(localStorage).filter(k => k.startsWith('hexis-'));
+                  for (const k of keys) localStorage.removeItem(k);
+                } catch { /* ignore */ }
+                location.reload();
+              },
+            });
+          }}
+        >
+          Reset UI
+        </button>
       </div>
 
       {/* First-launch onboarding tutorial */}

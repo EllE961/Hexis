@@ -256,7 +256,9 @@ export default function DockPanel({ id, title, icon, children, hideHeader = fals
 
       {/* ═══ BODY ═══ */}
       <div className="flex-1 min-h-0 overflow-hidden" style={{ display: 'flex', flexDirection: 'column' }}>
-        {children}
+        <PanelErrorBoundary panelId={id} panelTitle={title}>
+          {children}
+        </PanelErrorBoundary>
       </div>
 
       {/* ═══ RESIZE HANDLES — wide hit areas (8px), visible amber line on hover ═══ */}
@@ -316,4 +318,79 @@ export default function DockPanel({ id, title, icon, children, hideHeader = fals
       )}
     </div>
   );
+}
+
+// ─── Per-panel error boundary ───
+//
+// Wraps every dock panel's body so one crashing panel doesn't take down
+// the whole app. Crucial for chat survivability: if the hex grid or
+// editor throws, chat must keep working. Shows a compact error card
+// with a Reload button that resets the boundary's error state.
+class PanelErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error(`[dock panel "${this.props.panelId}" crashed]`, error, info?.componentStack);
+  }
+  reset = () => this.setState({ error: null });
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          gap: 12,
+          color: W.textMuted,
+          fontFamily: W.fontFamily,
+        }}>
+          <div style={{
+            fontSize: W.fontLg,
+            fontWeight: W.fontWeightSemi,
+            color: W.red,
+          }}>
+            {this.props.panelTitle || this.props.panelId} crashed
+          </div>
+          <div style={{
+            fontSize: W.fontSm,
+            maxWidth: 360,
+            textAlign: 'center',
+            color: W.textDim,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}>
+            {this.state.error?.message || String(this.state.error)}
+          </div>
+          <button
+            onClick={this.reset}
+            style={{
+              marginTop: 4,
+              padding: `${W.s2}px ${W.s3}px`,
+              background: W.bg2,
+              border: `1px solid ${W.border}`,
+              borderRadius: W.radius1,
+              color: W.text,
+              fontSize: W.fontMd,
+              cursor: 'pointer',
+            }}
+          >
+            Reload panel
+          </button>
+          <div style={{ fontSize: W.fontSm, color: W.textDim }}>
+            Other panels are still working.
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }

@@ -1085,6 +1085,48 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
         r: hex.r,
       };
     }
+
+    // SNAP-TO-NEAREST-FILE when zoomed out: the exact hex under the
+    // cursor didn't own a file, but at low zoom a click that misses by
+    // a few pixels shouldn't fail — hexes are tiny on-screen and the
+    // user is almost always aiming at a visible cell. Scan a 5×5
+    // neighborhood around `hex` and snap to the closest file within
+    // ~18 screen pixels (projected to world space via zoom). We only
+    // do this below zoom 1.0 so full-zoom clicks stay precise.
+    if (vp.zoom < 1.0 && layout.cellOwner) {
+      const screenSnapRadius = 20;
+      const worldSnapRadius = screenSnapRadius / vp.zoom;
+      let best = null;
+      let bestDist = Infinity;
+      for (let dq = -2; dq <= 2; dq++) {
+        for (let dr = -2; dr <= 2; dr++) {
+          const nq = hex.q + dq;
+          const nr = hex.r + dr;
+          const nOwner = layout.cellOwner.get(`${nq},${nr}`);
+          if (nOwner?.kind !== 'file') continue;
+          const pix = hexToPixel(nq, nr, HEX_SIZE);
+          const dx = pix.x - world.x;
+          const dy = pix.y - world.y;
+          const d = Math.hypot(dx, dy);
+          if (d <= worldSnapRadius && d < bestDist) {
+            bestDist = d;
+            best = { q: nq, r: nr, owner: nOwner };
+          }
+        }
+      }
+      if (best) {
+        const file = layout._fileMap?.get(best.owner.filePath);
+        return {
+          kind: 'file',
+          filePath: best.owner.filePath,
+          groupPath: file?.group_path || '.',
+          q: best.q,
+          r: best.r,
+          snapped: true,
+        };
+      }
+    }
+
     if (owner?.kind === 'empty') {
       return {
         kind: 'empty',

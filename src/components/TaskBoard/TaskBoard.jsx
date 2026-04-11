@@ -720,7 +720,13 @@ function TaskCard({
                     color: isDone ? T.muted : T.text,
                     textDecoration: isDone ? 'line-through' : 'none',
                     lineHeight: 1.3,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    // Wrap to 2 lines before ellipsizing instead of cutting
+                    // after ~40 chars on a single line.
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden',
+                    wordBreak: 'break-word',
                     flex: 1,
                   }}>
                     {task.title}

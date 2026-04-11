@@ -1327,21 +1327,47 @@ Protected files are enforced by a pre-tool hook — if you try to edit a lockfil
     return;
   }
 
-  // 3a. Three personas run in parallel (Sonnet)
-  const personaReviews = await runPersonaReviews(taskId, prompt, plan, allTouchedFiles, repoPath, broadcast, task);
-  totalCost += personaReviews.cost;
-  totalTokensUsed += personaReviews.tokens;
-  totalCacheRead += personaReviews.cacheRead || 0;
-  totalCacheCreation += personaReviews.cacheCreation || 0;
+  // trivial_edit = small rename/typo/one-function add → skip the full
+  // 3-persona + final-merger review pipeline. Running 4 Sonnet/Opus
+  // reviewers on a 13-line pure-math file costs $2+ and adds 60+
+  // seconds for zero practical benefit — the classifier's whole job
+  // is to identify these runs and let them bypass the heavy review.
+  // We still record an auto-approved review so the Task Board shows
+  // a completed card rather than an unreviewed one.
+  let finalReview;
+  if (intent === 'trivial_edit') {
+    broadcast({ type: 'agent_stream', text: `\n[trivial_edit — skipping persona review pipeline]\n` });
+    finalReview = {
+      cost: 0,
+      tokens: 0,
+      cacheRead: 0,
+      cacheCreation: 0,
+      result: {
+        approved: true,
+        confidence: 0.9,
+        summary: `Auto-approved: classified as trivial_edit (${allTouchedFiles.length} file${allTouchedFiles.length === 1 ? '' : 's'} touched). Full persona review skipped to save cost.`,
+        issues: [],
+        skipped: true,
+      },
+    };
+    broadcast({ type: 'task_review', review: finalReview.result });
+  } else {
+    // 3a. Three personas run in parallel (Sonnet)
+    const personaReviews = await runPersonaReviews(taskId, prompt, plan, allTouchedFiles, repoPath, broadcast, task);
+    totalCost += personaReviews.cost;
+    totalTokensUsed += personaReviews.tokens;
+    totalCacheRead += personaReviews.cacheRead || 0;
+    totalCacheCreation += personaReviews.cacheCreation || 0;
 
-  // 3b. Opus merger reviewer — semantic dedup + final verdict + learned conventions
-  const finalReview = await runFinalReview(taskId, prompt, plan, personaReviews.personas, allTouchedFiles, repoPath, broadcast, task);
-  totalCost += finalReview.cost;
-  totalTokensUsed += finalReview.tokens;
-  totalCacheRead += finalReview.cacheRead || 0;
-  totalCacheCreation += finalReview.cacheCreation || 0;
+    // 3b. Opus merger reviewer — semantic dedup + final verdict + learned conventions
+    finalReview = await runFinalReview(taskId, prompt, plan, personaReviews.personas, allTouchedFiles, repoPath, broadcast, task);
+    totalCost += finalReview.cost;
+    totalTokensUsed += finalReview.tokens;
+    totalCacheRead += finalReview.cacheRead || 0;
+    totalCacheCreation += finalReview.cacheCreation || 0;
 
-  broadcast({ type: 'task_review', review: finalReview.result });
+    broadcast({ type: 'task_review', review: finalReview.result });
+  }
 
   // ─── Review-fix loop: full-context fix on critical issues ───
   if (!finalReview.result.approved && lastCoderSessionId) {

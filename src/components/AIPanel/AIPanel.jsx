@@ -406,13 +406,20 @@ function RunCard({ run, isFocused, streamOutput, allAgents, onFocus, onCancel, o
             flexShrink: 0,
           }}
         />
-        {/* Title (truncated prompt) */}
+        {/* Title — wraps to 2 lines before ellipsizing. We slice the prompt
+            down to a generous 160 chars first (most titles fit in one line;
+            long prompts show ~2 lines before clipping) */}
         <div style={{
           flex: 1, minWidth: 0,
           fontSize: 13, fontWeight: 600, color: C.text,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          lineHeight: '18px',
+          display: '-webkit-box',
+          WebkitBoxOrient: 'vertical',
+          WebkitLineClamp: 2,
+          overflow: 'hidden',
+          wordBreak: 'break-word',
         }}>
-          {run.prompt?.slice(0, 80)}{run.prompt?.length > 80 ? '…' : ''}
+          {run.prompt?.slice(0, 160)}{run.prompt?.length > 160 ? '…' : ''}
         </div>
         {/* Status badge */}
         <span style={{

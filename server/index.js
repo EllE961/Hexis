@@ -1042,23 +1042,34 @@ app.get('/api/workspace', (_req, res) => {
   res.json({ path: REPO_PATH });
 });
 
-// Returns the raw contents of .hexis/memories/learned.md for the memory
-// side panel. Every Final Reviewer appends to this file, so it's the
-// compounding-quality loop made visible. Returns an empty string (not
-// 404) when the file doesn't exist so the UI can show an empty state.
+// Returns the raw contents of .hexis/memories/learned.md plus a
+// freshness map. Freshness is pre-computed server-side keyed by the
+// exact rule line text (stripping the leading bullet marker) so the
+// client doesn't need to duplicate the hash function. Value is 0..1
+// where 1 = applied today, 0 = never / >30d ago.
 app.get('/api/memory/learned', async (_req, res) => {
   try {
     const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
-    try {
-      const content = await readFile(path, 'utf-8');
-      res.json({ path: '.hexis/memories/learned.md', content, exists: true });
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        res.json({ path: '.hexis/memories/learned.md', content: '', exists: false });
-      } else {
-        throw err;
+    const meta = await loadMemoryMeta();
+    let content = '';
+    let exists = true;
+    try { content = await readFile(path, 'utf-8'); }
+    catch (err) {
+      if (err.code === 'ENOENT') { exists = false; }
+      else throw err;
+    }
+    // Build freshness-by-text map
+    const freshness = {};
+    if (exists) {
+      for (const line of content.split(/\r?\n/)) {
+        const m = /^\s*-\s+(.+)$/.exec(line);
+        if (m) {
+          const text = m[1];
+          freshness[text] = freshnessScore(meta, text);
+        }
       }
     }
+    res.json({ path: '.hexis/memories/learned.md', content, exists, freshness });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1289,12 +1300,26 @@ app.get('/api/memory/search', async (req, res) => {
 
     // Filter by scope if a file filter is present:
     // - Global rules (no scopes) always qualify
-    // - Scoped rules must match at least one file
+    // - Scoped rules match when:
+    //     a) the scope glob matches at least one supplied file, OR
+    //     b) the scope glob is a PARENT of at least one file (so a
+    //        `src/components/*` rule applies to
+    //        `src/components/deeply/nested.jsx`), OR
+    //     c) the scope references the parent directory of a file
+    //        (so `src/components` matches `src/components/Foo.jsx`)
+    // Parent-directory match is implicit: we also test the file's
+    // parent chain against the scope.
+    const expandedFiles = files.flatMap(f => parentPaths(f));
     const scopeFiltered = files.length === 0
       ? parsed
       : parsed.filter(p =>
           p.scopes.length === 0 ||
-          p.scopes.some(s => files.some(f => matchGlob(f, s))));
+          p.scopes.some(s =>
+            expandedFiles.some(f => matchGlob(f, s)) ||
+            // Also allow the scope to be a bare path prefix (e.g.
+            // `src/components` matching `src/components/Foo.jsx`).
+            files.some(f => f.startsWith(s.replace(/\/\*+$/, '') + '/') || f === s)
+          ));
 
     // If no query, return the filtered list as-is (up to `limit`)
     if (!q) {
@@ -1308,6 +1333,9 @@ app.get('/api/memory/search', async (req, res) => {
     const terms = q.toLowerCase().split(/\s+/).filter(t => t.length > 2 && !STOP.has(t));
     if (terms.length === 0) return res.json({ results: [] });
 
+    // Load freshness metadata so we can boost recently-used rules
+    const meta = await loadMemoryMeta();
+
     const scored = scopeFiltered.map(p => {
       const lower = p.rule.toLowerCase();
       let score = 0;
@@ -1317,16 +1345,101 @@ app.get('/api/memory/search', async (req, res) => {
       // File-scoped rules that MATCHED the file filter get a boost —
       // they're more specific than global rules and should rank first.
       if (files.length > 0 && p.scopes.length > 0) score += 0.5;
-      return { rule: p.rule, score, scopes: p.scopes };
+      // Freshness boost: recently-applied rules get up to +0.3.
+      // Prevents stale rules from outranking newer more-relevant ones.
+      const fresh = freshnessScore(meta, p.rule);
+      score += fresh * 0.3;
+      return { rule: p.rule, score, scopes: p.scopes, freshness: fresh };
     }).filter(r => r.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+
+    // Bump last-applied for the rules we're about to return.
+    // Fire-and-forget — don't block the response.
+    bumpAppliedRules(scored.map(r => r.rule)).catch(() => {});
 
     res.json({ results: scored });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ─── Memory freshness tracking ──────────────────────────────────
+// learned.md stays as plain markdown so it's human-editable and
+// diff-friendly. But we need a way to track *usage* of each rule
+// for freshness ranking without polluting the file itself.
+// Solution: a sidecar JSON at `.hexis/memories/meta.json` keyed by
+// a short hash of each rule's text:
+//   { "<hash>": { "applied": [<timestamp>, ...], "lastApplied": <ts> } }
+// Rules that get injected into turns bump their entry; the Memory
+// panel + search both read these to weight + dim stale rules.
+
+import { createHash as _createHash } from 'crypto';
+function ruleHash(text) {
+  return _createHash('sha1').update(text.trim().toLowerCase()).digest('hex').slice(0, 12);
+}
+
+async function loadMemoryMeta() {
+  try {
+    const { readFile } = await import('fs/promises');
+    const metaPath = resolve(REPO_PATH, '.hexis', 'memories', 'meta.json');
+    const raw = await readFile(metaPath, 'utf-8');
+    return JSON.parse(raw);
+  } catch { return {}; }
+}
+
+async function saveMemoryMeta(meta) {
+  try {
+    const { mkdir, writeFile } = await import('fs/promises');
+    const dir = resolve(REPO_PATH, '.hexis', 'memories');
+    await mkdir(dir, { recursive: true });
+    const metaPath = resolve(dir, 'meta.json');
+    await writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+  } catch { /* ignore */ }
+}
+
+// Bump the last-applied timestamp for each rule, prune old entries
+// beyond the 20 most recent applications per rule.
+async function bumpAppliedRules(rules) {
+  if (!rules || rules.length === 0) return;
+  const meta = await loadMemoryMeta();
+  const now = Date.now();
+  for (const r of rules) {
+    const h = ruleHash(r);
+    if (!meta[h]) meta[h] = { applied: [], lastApplied: 0 };
+    meta[h].applied.push(now);
+    if (meta[h].applied.length > 20) meta[h].applied = meta[h].applied.slice(-20);
+    meta[h].lastApplied = now;
+  }
+  await saveMemoryMeta(meta);
+}
+
+// Return freshness score in [0, 1]: 1 = used today, 0 = never
+// used or >30d ago. Linear decay over 30 days.
+function freshnessScore(meta, ruleText) {
+  const entry = meta[ruleHash(ruleText)];
+  if (!entry || !entry.lastApplied) return 0;
+  const ageDays = (Date.now() - entry.lastApplied) / (24 * 60 * 60 * 1000);
+  if (ageDays <= 0) return 1;
+  if (ageDays >= 30) return 0;
+  return 1 - ageDays / 30;
+}
+
+// Expand a file path into its "parent chain" — the file itself
+// plus every ancestor directory, each with a trailing `/**`
+// appended. This lets us match scope globs like `src/**` against
+// a file like `src/components/Foo.jsx` by including
+// `src/components/Foo.jsx`, `src/components/**`, `src/**`.
+function parentPaths(file) {
+  const parts = file.split('/');
+  const out = [file];
+  for (let i = parts.length - 1; i > 0; i--) {
+    const dir = parts.slice(0, i).join('/');
+    out.push(dir + '/**');
+    out.push(dir + '/*');
+  }
+  return out;
+}
 
 // Tiny glob matcher — supports `*` (any except `/`) and `**` (any).
 // Good enough for scope tags like `src/components/*.jsx` or

@@ -1085,6 +1085,22 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
       // Complete assistant messages (tool calls + reasoning)
       if (message.type === 'assistant' && message.message?.content) {
         for (const block of message.message.content) {
+          // Thinking blocks — Opus adaptive-thinking emits these.
+          // Stream them to the UI as a dedicated event so chat mode
+          // can render them as collapsible "reasoning" cards. Hidden
+          // behind `onToolResult` because it's only chat that wants
+          // to see them; agent pipeline already has richer views.
+          if (block.type === 'thinking' && onToolResult) {
+            try {
+              onToolResult({
+                id: `thinking-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                name: '__thinking__',
+                input: {},
+                result: block.thinking || '',
+                isError: false,
+              });
+            } catch { /* ignore */ }
+          }
           if (block.type === 'tool_use') {
             const toolName = block.name;
             const input = block.input || {};

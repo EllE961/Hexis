@@ -38,6 +38,7 @@ async function deleteRule(text) {
 
 export default function MemoryPanel() {
   const [content, setContent] = useState('');
+  const [freshness, setFreshness] = useState({});
   const [exists, setExists] = useState(true);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -48,6 +49,7 @@ export default function MemoryPanel() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setContent(data.content || '');
+      setFreshness(data.freshness || {});
       setExists(!!data.exists);
       setError(null);
     } catch (err) {
@@ -131,7 +133,7 @@ export default function MemoryPanel() {
           <EmptyState onSeeded={refresh} />
         )}
         {!loading && !error && exists && (
-          <LearnedRenderer content={content} onRefresh={refresh} />
+          <LearnedRenderer content={content} freshness={freshness} onRefresh={refresh} />
         )}
       </div>
     </div>
@@ -204,7 +206,7 @@ function EmptyState({ onSeeded }) {
 // Very lightweight markdown-ish renderer. Doesn't pull in a full MD lib
 // for this one panel — we parse the three things `learned.md` actually
 // uses: `##` h2 headings, `-` bullets, and inline `code` backticks.
-function LearnedRenderer({ content, onRefresh }) {
+function LearnedRenderer({ content, freshness = {}, onRefresh }) {
   const lines = content.split(/\r?\n/);
   const blocks = [];
   let buf = [];
@@ -248,7 +250,14 @@ function LearnedRenderer({ content, onRefresh }) {
           );
         }
         if (b.kind === 'li') {
-          return <RuleItem key={i} text={b.text} onChanged={onRefresh} />;
+          return (
+            <RuleItem
+              key={i}
+              text={b.text}
+              freshness={freshness[b.text]}
+              onChanged={onRefresh}
+            />
+          );
         }
         return (
           <p key={i} style={{ margin: `${W.s2}px 0`, color: W.textMuted }}>
@@ -263,10 +272,16 @@ function LearnedRenderer({ content, onRefresh }) {
 // Individual rule with hover-revealed edit + delete actions.
 // Click edit → becomes a textarea inline, Enter saves, Esc cancels.
 // Click delete → confirmation prompt then DELETE request.
-function RuleItem({ text, onChanged }) {
+function RuleItem({ text, freshness, onChanged }) {
   const [mode, setMode] = useState('view'); // view | edit | saving
   const [draft, setDraft] = useState(text);
   const [hover, setHover] = useState(false);
+  // Freshness: 1 = applied today, 0 = never or >30d ago.
+  // Fresh rules render at full opacity; stale ones fade toward 0.45.
+  // Undefined freshness (no metadata yet) renders at 0.7 to distinguish
+  // from "active".
+  const fresh = freshness ?? 0.7;
+  const rowOpacity = 0.45 + fresh * 0.55;
 
   const save = async () => {
     const next = draft.trim();
@@ -364,6 +379,15 @@ function RuleItem({ text, onChanged }) {
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      title={
+        freshness === undefined
+          ? 'No usage data yet'
+          : freshness > 0.8
+            ? 'Applied recently'
+            : freshness > 0.2
+              ? `Applied ~${Math.round((1 - freshness) * 30)}d ago`
+              : 'Stale — not applied in 30+ days'
+      }
       style={{
         display: 'flex',
         gap: W.s2,
@@ -372,9 +396,14 @@ function RuleItem({ text, onChanged }) {
         padding: `${W.s1}px ${W.s1}px`,
         borderRadius: W.radius1,
         background: hover ? 'rgba(255, 255, 255, 0.02)' : 'transparent',
+        opacity: hover ? 1 : rowOpacity,
+        transition: 'opacity 120ms',
       }}
     >
-      <span style={{ color: W.accent, flexShrink: 0 }}>•</span>
+      <span style={{
+        color: fresh > 0.5 ? W.accent : W.textDim,
+        flexShrink: 0,
+      }}>•</span>
       <span style={{ flex: 1 }}>{renderInline(text)}</span>
       {hover && (
         <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>

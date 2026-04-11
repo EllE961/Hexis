@@ -489,6 +489,7 @@ export default function ChatPanel() {
           }}>
             {chat?.title || 'Chat'}
           </div>
+          <ProjectCostTracker chats={chats} />
           <ContextBudget chat={chat} />
           <select
             value={chat?.model || 'sonnet'}
@@ -856,7 +857,6 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
             tokensOut={tokensOut}
             cachedRead={cachedRead}
             tokensTotal={tokens}
-            cost={cost}
           />
         )}
       </div>
@@ -1010,6 +1010,70 @@ function ToolCallsList({ calls }) {
 function ToolCallCard({ call }) {
   const [expanded, setExpanded] = useState(false);
   const { name, input, resultPreview, resultLength, isError } = call;
+
+  // Thinking blocks get a distinct visual treatment — they're the
+  // model's chain-of-thought, not a tool call. Render as a purple
+  // collapsible card with "Reasoning" label and the full thought
+  // text inside. Only Opus emits these (with thinking: 'adaptive').
+  if (name === '__thinking__') {
+    return (
+      <div style={{
+        background: 'rgba(138, 43, 226, 0.08)',
+        border: '1px solid rgba(138, 43, 226, 0.35)',
+        borderRadius: W.radius1,
+        fontSize: 12,
+        overflow: 'hidden',
+      }}>
+        <button
+          onClick={() => setExpanded(v => !v)}
+          style={{
+            width: '100%',
+            padding: `${W.s1}px ${W.s2}px`,
+            background: 'transparent',
+            border: 'none',
+            color: '#b794f4',
+            fontSize: 12,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: W.s2,
+            textAlign: 'left',
+          }}
+        >
+          <span style={{ fontWeight: W.fontWeightSemi, flexShrink: 0 }}>
+            {expanded ? '▾' : '▸'} Reasoning
+          </span>
+          <span style={{
+            flex: 1,
+            color: W.textDim,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            fontFamily: W.fontFamily,
+          }}>
+            {(resultPreview || '').slice(0, 80).replace(/\n/g, ' ')}
+          </span>
+        </button>
+        {expanded && (
+          <div style={{
+            padding: `${W.s2}px ${W.s3}px`,
+            borderTop: '1px solid rgba(138, 43, 226, 0.35)',
+            background: 'rgba(138, 43, 226, 0.04)',
+            maxHeight: 280,
+            overflowY: 'auto',
+            color: W.text,
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            fontFamily: W.fontFamily,
+          }}>
+            {resultPreview || '(empty)'}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Human-friendly single-line summary for the collapsed view.
   // Different tools have different "interesting" input fields.
@@ -1482,12 +1546,15 @@ function fmtCount(n) {
   return String(n);
 }
 
-function CostFooter({ tokensIn, tokensOut, cachedRead, tokensTotal, cost }) {
-  // Fall back to the old single-sum display if the breakdown fields
-  // aren't present (messages written before the per-turn breakdown landed).
+// Per-turn usage footer. Tokens only — Hexis runs on a Claude
+// subscription (flat fee), so per-token dollar figures are
+// misleading. Users care about: how many tokens this turn sent,
+// how many the model generated, and how much of the input was
+// served from the prompt cache.
+function CostFooter({ tokensIn, tokensOut, cachedRead, tokensTotal }) {
   const hasBreakdown = tokensIn !== undefined || tokensOut !== undefined;
   if (!hasBreakdown) {
-    return <span>{(tokensTotal || 0).toLocaleString()} tok · ${cost?.toFixed(4) || '0.0000'}</span>;
+    return <span>{(tokensTotal || 0).toLocaleString()} tok</span>;
   }
   // Cache hit rate as a % of input tokens. Green above 80, amber
   // between 40 and 80, red below 40. Turns 2+ should almost always
@@ -1509,7 +1576,6 @@ function CostFooter({ tokensIn, tokensOut, cachedRead, tokensTotal, cost }) {
           · {hitPct}% cached
         </span>
       )}
-      <span>· ${cost?.toFixed(4) || '0.0000'}</span>
     </span>
   );
 }
@@ -1784,6 +1850,70 @@ function MentionPopup({ matches, activeIdx, onPick, onHover }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Cumulative project usage tracker. Sums TOKENS across all chats
+// in the current project (chats are already per-project scoped via
+// chatStore.setRepoScope). Shows tokens, not dollars — Hexis runs
+// on a Claude subscription (flat fee), so per-token cost figures
+// are misleading. Two sub-totals: today's turns (last 24h) and
+// lifetime. Hover for detailed breakdown.
+function ProjectCostTracker({ chats }) {
+  const totals = useMemo(() => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let lifeTok = 0, lifeCached = 0, lifeTurns = 0;
+    let todayTok = 0, todayCached = 0, todayTurns = 0;
+    for (const c of Object.values(chats || {})) {
+      for (const m of c.messages || []) {
+        if (m.role !== 'assistant' || m.isHandoff) continue;
+        if (!m.tokens) continue;
+        lifeTok += m.tokens || 0;
+        lifeCached += m.cachedRead || 0;
+        lifeTurns++;
+        if (m.ts >= cutoff) {
+          todayTok += m.tokens || 0;
+          todayCached += m.cachedRead || 0;
+          todayTurns++;
+        }
+      }
+    }
+    return { lifeTok, lifeCached, lifeTurns, todayTok, todayCached, todayTurns };
+  }, [chats]);
+  if (totals.lifeTurns === 0) return null;
+  const tip =
+    `Project token usage\n` +
+    `─────────────────\n` +
+    `Today: ${fmtCount(totals.todayTok)} tokens · ${fmtCount(totals.todayCached)} cached · ${totals.todayTurns} turns\n` +
+    `All time: ${fmtCount(totals.lifeTok)} tokens · ${fmtCount(totals.lifeCached)} cached · ${totals.lifeTurns} turns`;
+  return (
+    <div
+      title={tip}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '2px 8px',
+        border: `1px solid ${W.border}`,
+        borderRadius: W.radius1,
+        color: W.textDim,
+        fontSize: 10,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      }}
+    >
+      <span>proj</span>
+      <span style={{ color: W.text, fontWeight: W.fontWeightSemi }}>
+        {fmtCount(totals.lifeTok)} tok
+      </span>
+      {totals.todayTurns > 0 && (
+        <>
+          <span>·</span>
+          <span style={{ color: '#4ade80' }}>
+            {fmtCount(totals.todayTok)} today
+          </span>
+        </>
+      )}
     </div>
   );
 }

@@ -366,7 +366,17 @@ export default function ChatPanel() {
             <EmptyState />
           )}
           {messages.map((m, i) => (
-            <Message key={i} role={m.role} content={m.content} tokens={m.tokens} cost={m.cost} />
+            <Message
+              key={i}
+              role={m.role}
+              content={m.content}
+              tokens={m.tokens}
+              tokensIn={m.tokensIn}
+              tokensOut={m.tokensOut}
+              cachedRead={m.cachedRead}
+              cost={m.cost}
+              fileChanges={m.fileChanges}
+            />
           ))}
           {sending && (
             <Message
@@ -489,7 +499,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, tokens, cost, streaming }) {
+function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -521,7 +531,13 @@ function Message({ role, content, tokens, cost, streaming }) {
           </span>
         )}
         {!streaming && tokens > 0 && (
-          <span>{tokens.toLocaleString()} tok · ${cost?.toFixed(4) || '0.0000'}</span>
+          <CostFooter
+            tokensIn={tokensIn}
+            tokensOut={tokensOut}
+            cachedRead={cachedRead}
+            tokensTotal={tokens}
+            cost={cost}
+          />
         )}
       </div>
       <div style={{
@@ -533,13 +549,198 @@ function Message({ role, content, tokens, cost, streaming }) {
         color: W.text,
         fontSize: W.fontLg,
         lineHeight: 1.55,
-        whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
         fontFamily: isUser ? W.fontFamily : W.fontFamily,
         minHeight: isEmptyStreaming ? 28 : undefined,
       }}>
-        {content || (isEmptyStreaming ? <ThinkingDots /> : '')}
+        {isEmptyStreaming ? (
+          <ThinkingDots />
+        ) : isUser ? (
+          // User messages are plain text, render as-is
+          <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>
+        ) : (
+          // Assistant messages: split streaming text into text + tool-call
+          // blocks. Tool markers like `[hexis tool: memory_view]`,
+          // `[search: **/*.js]`, `[grep: foo]`, `$ npm test` become
+          // compact pills instead of flat text, matching Claude Code's
+          // inline tool-use rendering.
+          <AssistantBlocks content={content} />
+        )}
       </div>
+      {/* File-changes row — lists every file the agent edited this
+          turn as a compact pill below the message bubble. Only for
+          assistant messages that actually touched files. */}
+      {!isUser && !streaming && fileChanges?.length > 0 && (
+        <FileChangesRow files={fileChanges} />
+      )}
+    </div>
+  );
+}
+
+function FileChangesRow({ files }) {
+  return (
+    <div style={{
+      marginTop: W.s1,
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: W.s1,
+      maxWidth: '85%',
+      alignItems: 'center',
+    }}>
+      <span style={{
+        fontSize: W.fontSm,
+        color: W.textMuted,
+        marginRight: W.s2,
+      }}>
+        edited
+      </span>
+      {files.map((f, i) => (
+        <span key={i} style={{
+          padding: `2px ${W.s2}px`,
+          background: 'rgba(46, 160, 67, 0.08)',
+          border: `1px solid rgba(46, 160, 67, 0.35)`,
+          borderRadius: W.radius1,
+          fontSize: W.fontSm,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          color: '#4ade80',
+        }}>
+          {f}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ─── Cost / token footer ───
+
+// Formats large numbers compactly (12345 → "12.3k", 999 → "999").
+function fmtCount(n) {
+  if (!n && n !== 0) return '0';
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
+
+function CostFooter({ tokensIn, tokensOut, cachedRead, tokensTotal, cost }) {
+  // Fall back to the old single-sum display if the breakdown fields
+  // aren't present (messages written before the per-turn breakdown landed).
+  const hasBreakdown = tokensIn !== undefined || tokensOut !== undefined;
+  if (!hasBreakdown) {
+    return <span>{(tokensTotal || 0).toLocaleString()} tok · ${cost?.toFixed(4) || '0.0000'}</span>;
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+      <span>{fmtCount(tokensIn)}↑ / {fmtCount(tokensOut)}↓</span>
+      {cachedRead > 0 && (
+        <span style={{ color: W.textDim }}>· {fmtCount(cachedRead)} cached</span>
+      )}
+      <span>· ${cost?.toFixed(4) || '0.0000'}</span>
+    </span>
+  );
+}
+
+// ─── Assistant message block renderer ───
+
+// Markers we recognise. Order matters: longer / more specific first.
+// Each matcher returns { kind, name, arg } or null.
+const TOOL_PATTERNS = [
+  { re: /\n\[hexis tool:\s*([^\]]+)\]\n/, kind: 'tool', name: (m) => m[1].trim() },
+  { re: /\n\[search:\s*([^\]]+)\]\n/,     kind: 'glob', name: () => 'Glob',         arg: (m) => m[1].trim() },
+  { re: /\n\[grep:\s*([^\]]+)\]\n/,       kind: 'grep', name: () => 'Grep',         arg: (m) => m[1].trim() },
+  { re: /\n\[intent:\s*([^\]]+)\]\n/,     kind: 'meta', name: () => 'intent',       arg: (m) => m[1].trim() },
+  // Generic [...] bracketed status (research phases, scheduled, trivial_edit, etc)
+  { re: /\n\[([^\]]{3,})\]\n/,            kind: 'meta', name: () => 'status',       arg: (m) => m[1].trim() },
+  // Bash commands: `\n$ ...\n`
+  { re: /\n\$ ([^\n]+)\n/,                kind: 'bash', name: () => 'Bash',         arg: (m) => m[1].trim() },
+];
+
+function parseAssistantBlocks(text) {
+  if (!text) return [];
+  const blocks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    // Find the earliest match across all patterns
+    let earliest = null;
+    for (const p of TOOL_PATTERNS) {
+      const m = p.re.exec(remaining);
+      if (m && (earliest === null || m.index < earliest.index)) {
+        earliest = { ...p, match: m, index: m.index, length: m[0].length };
+      }
+    }
+    if (!earliest) {
+      // No more tools — rest is text
+      if (remaining.trim()) blocks.push({ kind: 'text', value: remaining });
+      break;
+    }
+    // Leading text before the tool
+    if (earliest.index > 0) {
+      const pre = remaining.slice(0, earliest.index);
+      if (pre.trim()) blocks.push({ kind: 'text', value: pre });
+    }
+    // Tool/block
+    blocks.push({
+      kind: earliest.kind,
+      name: earliest.name(earliest.match),
+      arg: earliest.arg ? earliest.arg(earliest.match) : '',
+    });
+    remaining = remaining.slice(earliest.index + earliest.length);
+  }
+  return blocks;
+}
+
+function AssistantBlocks({ content }) {
+  const blocks = useMemo(() => parseAssistantBlocks(content), [content]);
+  if (blocks.length === 0) {
+    return <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: W.s1 }}>
+      {blocks.map((b, i) => (
+        <Block key={i} block={b} />
+      ))}
+    </div>
+  );
+}
+
+function Block({ block }) {
+  if (block.kind === 'text') {
+    return <span style={{ whiteSpace: 'pre-wrap' }}>{block.value}</span>;
+  }
+  // Tool / bash / search / grep / meta — render as a compact pill
+  const isMeta = block.kind === 'meta';
+  const label = block.name;
+  const arg = block.arg;
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: W.s2,
+      padding: `${W.s1}px ${W.s2}px`,
+      background: isMeta ? 'rgba(200,200,200,0.04)' : W.accentBg,
+      border: `1px solid ${isMeta ? W.border : W.accentSoft}`,
+      borderRadius: W.radius1,
+      fontSize: W.fontSm,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      color: isMeta ? W.textMuted : W.text,
+      alignSelf: 'flex-start',
+      maxWidth: '100%',
+    }}>
+      <span style={{
+        color: isMeta ? W.textDim : W.accent,
+        fontWeight: W.fontWeightSemi,
+      }}>
+        {label}
+      </span>
+      {arg && (
+        <span style={{
+          opacity: 0.9,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          maxWidth: 520,
+        }}>
+          {arg}
+        </span>
+      )}
     </div>
   );
 }

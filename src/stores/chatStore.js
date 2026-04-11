@@ -77,7 +77,12 @@ function saveChats(chats, activeId) {
           content: m.content,
           ts: m.ts,
           tokens: m.tokens,
+          tokensIn: m.tokensIn,
+          tokensOut: m.tokensOut,
+          cachedRead: m.cachedRead,
+          cachedNew: m.cachedNew,
           cost: m.cost,
+          fileChanges: m.fileChanges,
         })),
       };
     }
@@ -286,7 +291,12 @@ export const useChatStore = create((set, get) => ({
           content: data.text || c.streamBuffer || '',
           ts: Date.now(),
           tokens: data.tokens || 0,
+          tokensIn: data.tokensIn || 0,
+          tokensOut: data.tokensOut || 0,
+          cachedRead: data.cachedRead || 0,
+          cachedNew: data.cachedNew || 0,
           cost: data.cost || 0,
+          fileChanges: data.fileChanges || [],
         };
         // Auto-title from first user message while title is still default
         const title = (c.title === 'Main chat' || c.title === 'New chat') && c.messages.length <= 2

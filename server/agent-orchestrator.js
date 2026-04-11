@@ -772,6 +772,13 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
   });
   taggedBroadcast({ type: 'agent_spawned', agentId, role: 'coder', model: profile.model });
 
+  // Collect file paths the agent touches this turn. `runAgent` already
+  // broadcasts `agent_editing` / `agent_reading` events, but we also
+  // need a server-side tally so we can include it in the final HTTP
+  // response for the UI to render an inline "edited: foo.js, bar.js"
+  // row under the assistant message.
+  const editedFiles = new Set();
+
   try {
     const result = await runAgent({
       prompt: userMessage,
@@ -783,12 +790,16 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       tools: CODER_TOOLS,
       permissionMode: 'bypassPermissions',
       resume: resumeSessionId || undefined,
+      onToolUse: (kind, file) => {
+        if (kind === 'edit' && file) editedFiles.add(file);
+      },
       // Sonnet by default, Opus on request. `profile` also carries
       // `lightweight: true` so runAgent skips the per-turn Serena
       // subprocess spawn (2-5 s saved on every chat turn).
       ...profile,
     }, task, taggedBroadcast, agentId);
 
+    const editedFilesArr = [...editedFiles];
     taggedBroadcast({
       type: 'chat_turn_complete',
       agentId,
@@ -797,6 +808,7 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       tokensUsed: result.tokens.input + result.tokens.output,
       cost: result.cost,
       cacheHits: { read: result.tokens.cacheRead, creation: result.tokens.cacheCreation },
+      fileChanges: editedFilesArr,
     });
     taggedBroadcast({
       type: 'agent_complete',
@@ -810,7 +822,12 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       sessionId: result.sessionId,
       text: result.text,
       tokens: result.tokens.input + result.tokens.output,
+      tokensIn: result.tokens.input,
+      tokensOut: result.tokens.output,
+      cachedRead: result.tokens.cacheRead,
+      cachedNew: result.tokens.cacheCreation,
       cost: result.cost,
+      fileChanges: editedFilesArr,
     };
   } catch (err) {
     task.done = true;

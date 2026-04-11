@@ -86,12 +86,57 @@ function initPanels() {
     if (merged.edgeCollapsed === undefined) merged.edgeCollapsed = false;
     // Drop legacy flags
     delete merged.collapsed;
-    // Heal bad sizes: if persisted size is near screen dimensions (likely leaked maximize),
-    // reset to the default for that panel
+
+    // Panels whose DEFAULT is "floating" should never be persisted in a
+    // docked state — if a user drags them to an edge, that's a session
+    // thing, not a layout invariant. On reload, send them back to
+    // floating so they can't accidentally hog dock space. This is what
+    // broke round 2: the taskboard (default floating) somehow got
+    // `dock: left` with `width: 1559` and pushed the hex grid off screen.
+    if (def.mode === 'floating' && merged.mode === 'docked') {
+      merged.mode = 'floating';
+      merged.dock = null;
+      merged.width = def.width;
+      merged.height = def.height;
+      merged.x = def.x;
+      merged.y = def.y;
+    }
+
+    // Per-panel size heal: bad individual sizes (likely leaked maximize)
     if (def.width != null && merged.width > window.innerWidth * 0.9) merged.width = def.width;
     if (def.height != null && merged.height > window.innerHeight * 0.9) merged.height = def.height;
     panels[id] = merged;
   }
+
+  // Edge-total healer: sum up the persisted widths of every panel docked
+  // to `left` (or `right`). If they exceed 85% of window width the layout
+  // has visually collapsed — the hex grid ends up pushed off-screen. When
+  // that happens, reset every docked panel on that edge to its default
+  // width so the user gets a usable layout back instead of an invisible
+  // canvas. Same for bottom/height.
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  for (const edge of ['left', 'right']) {
+    const docked = Object.entries(panels)
+      .filter(([, p]) => p.visible && p.mode === 'docked' && p.dock === edge);
+    const totalW = docked.reduce((s, [, p]) => s + (p.width || 0), 0);
+    if (totalW > winW * 0.85) {
+      for (const [id] of docked) {
+        const def = DEFAULTS[id];
+        if (def?.width != null) panels[id].width = def.width;
+      }
+    }
+  }
+  const dockedBottom = Object.entries(panels)
+    .filter(([, p]) => p.visible && p.mode === 'docked' && p.dock === 'bottom');
+  const totalH = dockedBottom.reduce((s, [, p]) => s + (p.height || 0), 0);
+  if (totalH > winH * 0.8) {
+    for (const [id] of dockedBottom) {
+      const def = DEFAULTS[id];
+      if (def?.height != null) panels[id].height = def.height;
+    }
+  }
+
   return panels;
 }
 

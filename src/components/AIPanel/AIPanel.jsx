@@ -142,11 +142,18 @@ export default function AIPanel() {
             padding: '14px 16px',
             transition: 'border-color 0.2s ease',
           }}>
-            <input
-              type="text"
+            <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Describe a task — add as many as you like"
+              onKeyDown={(e) => {
+                // Enter submits, Shift+Enter inserts a newline
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (input.trim()) handleSubmit(e);
+                }
+              }}
+              placeholder="Describe a task — add as many as you like  (Shift+Enter for newline)"
+              rows={1}
               style={{
                 width: '100%',
                 background: 'transparent',
@@ -158,6 +165,18 @@ export default function AIPanel() {
                 letterSpacing: '-0.01em',
                 caretColor: C.accent,
                 lineHeight: '22px',
+                resize: 'none',
+                fontFamily: 'inherit',
+                minHeight: 22,
+                // Auto-grow up to ~8 lines, then scroll
+                maxHeight: 176,
+                overflowY: 'auto',
+              }}
+              ref={(el) => {
+                // Auto-resize to fit content each keystroke, bounded by maxHeight
+                if (!el) return;
+                el.style.height = 'auto';
+                el.style.height = Math.min(el.scrollHeight, 176) + 'px';
               }}
             />
             <div style={{

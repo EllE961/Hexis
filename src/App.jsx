@@ -717,12 +717,16 @@ export default function App() {
     fetchLastTestResults();
   }, []);
 
-  // Show/hide editor panel based on whether tabs exist
+  // Auto-show the editor panel whenever a tab opens, but DON'T
+  // auto-hide it when tabs drop to zero — the user may have pinned
+  // it open intentionally (e.g. to browse the embedded file tree,
+  // or because they toggled it via Ctrl+E / the View menu). The
+  // old "hide when empty" behavior was silently resetting the
+  // saved `visible:true` state on every reload, so localStorage
+  // could never persist an "editor is open" preference.
   useEffect(() => {
     if (tabs.length > 0) {
       usePanelStore.getState().showPanel('editor');
-    } else {
-      usePanelStore.getState().hidePanel('editor');
     }
   }, [tabs.length]);
 

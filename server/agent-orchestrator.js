@@ -500,7 +500,7 @@ export async function writeTask(rawPrompt, repoPath, broadcast) {
 RULES:
 - Respond with the JSON on your FIRST turn — do NOT call tools
 - Title: short imperative phrase under 80 chars
-- Description: clarify intent, requirements, acceptance criteria — stay faithful to what the user actually asked for
+- Description: clarify intent, requirements, acceptance criteria — stay faithful to what the user actually asked for. Do NOT restate the title as the first sentence of the description — the frontend concatenates title and description before sending them to the Planner, so a repeated title appears twice in the final prompt. Start the description with the reasoning/details, not the title.
 - Files: best-guess list of likely file paths based on keywords. Empty array is fine if you can't tell.
 - Priority: critical | high | medium | low — default to medium
 - Scope: small | medium | large — infer from breadth of changes implied`,

@@ -280,8 +280,22 @@ export const useAgentStore = create((set, get) => ({
       }
     }
 
-    const prompt = priorContext + (boardTask.description
-      ? `${boardTask.title}\n\n${boardTask.description}`
+    // Strip title from the beginning of description if the Writer duplicated
+    // it (common: the Writer's description restates the title as its first
+    // sentence, which makes the final prompt start with the title twice).
+    let cleanDesc = boardTask.description || '';
+    if (cleanDesc && boardTask.title) {
+      const t = boardTask.title.trim().replace(/[.!?]+$/, '');
+      const d = cleanDesc.trim();
+      if (d === t || d.startsWith(t + '.') || d.startsWith(t + '!') ||
+          d.startsWith(t + '\n') || d.toLowerCase().startsWith(t.toLowerCase() + '.') ||
+          d.toLowerCase().startsWith(t.toLowerCase() + ' ')) {
+        cleanDesc = d.slice(t.length).replace(/^[.!?\s]+/, '').trim();
+      }
+    }
+
+    const prompt = priorContext + (cleanDesc
+      ? `${boardTask.title}\n\n${cleanDesc}`
       : boardTask.title);
 
     taskStore.assignToAgent(boardTask.id, taskId);

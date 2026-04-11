@@ -1029,12 +1029,22 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Workspace ───
+
+// Returns the REPO_PATH the server is locked to. Used by the client to
+// scope per-project localStorage keys (chats, layout, history, etc.) so
+// switching HEXIS_TARGET between projects doesn't leak state.
+app.get('/api/workspace', (_req, res) => {
+  res.json({ path: REPO_PATH });
+});
+
 // ─── SSE ───
 
 app.get('/events', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-  res.write('data: {"type":"connected"}\n\n');
-  // Send full snapshot to new client so it can rebuild its view
+  // Include the repo path on connect so clients can scope their
+  // per-project state immediately, before any real events arrive.
+  res.write(`data: ${JSON.stringify({ type: 'connected', repoPath: REPO_PATH })}\n\n`);
   res.write(`data: ${JSON.stringify({ type: 'state_snapshot', state: stateStore.getSnapshot() })}\n\n`);
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));

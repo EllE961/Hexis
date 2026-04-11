@@ -390,6 +390,7 @@ export default function App() {
       case 'view:commandPalette':
         setCmdPaletteOpen(true);
         break;
+      case 'view:editor':           togglePanel('editor'); break;
       case 'view:outline':
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'o', ctrlKey: true, shiftKey: true }));
         break;
@@ -563,6 +564,7 @@ export default function App() {
       items: [
         { id: 'view:commandPalette', label: 'Command Palette…', shortcut: 'Ctrl+K', mnemonic: 'C' },
         { separator: true },
+        { id: 'view:editor', label: 'Editor', shortcut: 'Ctrl+E', mnemonic: 'd', checked: panels.editor?.visible },
         { id: 'view:explorer', label: 'Explorer', shortcut: 'Ctrl+Shift+E', mnemonic: 'E' },
         { id: 'view:outline', label: 'Outline', shortcut: 'Ctrl+Shift+O', mnemonic: 'O', checked: panels.editor?.visible },
         { id: 'view:search', label: 'Search', shortcut: 'Ctrl+Shift+F', mnemonic: 'S', checked: panels.search?.visible },
@@ -771,6 +773,12 @@ export default function App() {
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
+        // Server reports the real repo path on connect → scope any
+        // per-project stores (chats, etc.) to it so switching
+        // HEXIS_TARGET doesn't leak history between projects.
+        if (data.type === 'connected' && data.repoPath) {
+          useChatStore.getState().setRepoScope(data.repoPath);
+        }
         // Route agent events to the agent store (also handles chat_* events
         // via the bee/run bridge so chat turns spawn bees on the hex grid).
         if (data.type?.startsWith('agent_') || data.type?.startsWith('plan_') ||
@@ -829,12 +837,22 @@ export default function App() {
     }
   }, [openFile]);
 
-  // Double click = zoom to cell (file already open from single click)
+  // Double click = zoom to cell. It also ensures the file is open in the
+  // editor — usually the preceding single click has already opened it, but
+  // some code paths (drag-detect, missed hit-test, native dblclick events
+  // from automation tools) can skip the single-click branch. Treating
+  // double-click as a superset of single-click makes the UX forgiving:
+  // whatever the upstream path was, a double-click always ends with "file
+  // selected AND editor visible AND file loaded".
   const handleCellDoubleClick = useCallback((filePath) => {
-    if (filePath) {
-      setSelectedCell(filePath);
-    }
-  }, []);
+    if (!filePath) return;
+    setSelectedCell(filePath);
+    openFile(filePath);
+    const ps = usePanelStore.getState();
+    if (ps.panels.editor?.edgeCollapsed) ps.toggleEdgeCollapse('editor');
+    ps.showPanel('editor');
+    ps.focusPanel('editor');
+  }, [openFile]);
 
   // ─── Hex grid context menu state ─────────────────────────────────
   // ctxMenu shape when open: { x, y, items }
@@ -1614,6 +1632,16 @@ export default function App() {
         if (!editorFocused && !inputFocused) {
           e.preventDefault();
           togglePanel('chat');
+        }
+      }
+      // Ctrl+E: toggle Editor panel. Guarded so it doesn't swallow Ctrl+E
+      // inside a CodeMirror instance or other focused input.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'e' || e.key === 'E')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          togglePanel('editor');
         }
       }
       // Ctrl+O: open folder (native picker) — only when the editor isn't focused

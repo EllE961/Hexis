@@ -23,12 +23,40 @@
 
 import { create } from 'zustand';
 
-const STORAGE_KEY = 'hexis-chats';
+// Per-project scoping: chats are keyed by the server's repo path so
+// switching HEXIS_TARGET between projects doesn't leak chat history. The
+// actual repo path is discovered async via /api/workspace (or the SSE
+// `connected` event), so on first load we boot with the `:default` key
+// and then migrate to the repo-specific key once it arrives.
+const LEGACY_KEY = 'hexis-chats';
+const DEFAULT_SCOPE = ':default';
 const DEFAULT_CHAT_ID = 'chat-main';
 
-function loadChats() {
+function storageKey(scope) {
+  return `hexis-chats${scope}`;
+}
+
+// Simple djb2 hash → short hex, used to turn a long repo path into a
+// compact localStorage suffix without dragging in a crypto dependency.
+function hashPath(path) {
+  let h = 5381;
+  const s = String(path || '');
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+let currentScope = DEFAULT_SCOPE;
+
+function loadChats(scope = currentScope) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // Prefer scoped key; fall back to legacy unscoped key ONLY on first
+    // load (when migrating an old install). Don't cross-read between
+    // different scopes — that's the leak we're fixing.
+    const raw =
+      localStorage.getItem(storageKey(scope)) ||
+      (scope === DEFAULT_SCOPE ? localStorage.getItem(LEGACY_KEY) : null);
     if (!raw) return null;
     return JSON.parse(raw);
   } catch { return null; }
@@ -53,7 +81,7 @@ function saveChats(chats, activeId) {
         })),
       };
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ chats: slim, activeId }));
+    localStorage.setItem(storageKey(currentScope), JSON.stringify({ chats: slim, activeId }));
   } catch { /* ignore */ }
 }
 
@@ -100,6 +128,38 @@ function emitChatBridge(detail) {
 export const useChatStore = create((set, get) => ({
   chats: initial.chats,
   activeId: initial.activeId,
+  scope: DEFAULT_SCOPE,
+
+  // Called once at startup when the server reports the real repo path
+  // (via the SSE `connected` event or /api/workspace). Rehydrates the
+  // store from the project-scoped localStorage key instead of the
+  // generic `:default` key, and starts writing to the scoped key so
+  // future sessions for this project reuse their own history.
+  setRepoScope: (repoPath) => {
+    if (!repoPath) return;
+    const nextScope = `:${hashPath(repoPath)}`;
+    if (nextScope === get().scope) return;
+    currentScope = nextScope;
+    const saved = loadChats(nextScope);
+    if (saved && saved.chats && Object.keys(saved.chats).length > 0) {
+      const chats = {};
+      for (const [id, c] of Object.entries(saved.chats)) {
+        chats[id] = { ...c, sending: false, streamBuffer: '', error: null };
+      }
+      set({
+        chats,
+        activeId: saved.activeId || Object.keys(chats)[0],
+        scope: nextScope,
+      });
+    } else {
+      // First time seeing this project — start fresh, don't leak the
+      // default-scope chats into the new project's storage.
+      const id = DEFAULT_CHAT_ID;
+      const chats = { [id]: newChat(id, 'Main chat') };
+      set({ chats, activeId: id, scope: nextScope });
+      saveChats(chats, id);
+    }
+  },
 
   // ─── Chat lifecycle ───
 

@@ -779,6 +779,15 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
   // row under the assistant message.
   const editedFiles = new Set();
 
+  // Tool calls + their results for this turn. Fed to the UI via a
+  // new `chat_tool_result` SSE event so the chat panel can render
+  // inline expandable cards (Read foo.js → 42 lines, Bash "npm test"
+  // → ok, etc). Claude-Code parity for visible tool use.
+  const toolCalls = [];
+  // Tools the user doesn't care to see inline — these are
+  // orchestration plumbing, not "you asked for X" tool calls.
+  const QUIET_TOOLS = new Set();
+
   try {
     const result = await runAgent({
       prompt: userMessage,
@@ -792,6 +801,23 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       resume: resumeSessionId || undefined,
       onToolUse: (kind, file) => {
         if (kind === 'edit' && file) editedFiles.add(file);
+      },
+      onToolResult: (evt) => {
+        // Skip internal MCP tools — these are plumbing, not user-visible
+        if (QUIET_TOOLS.has(evt.name)) return;
+        if (evt.name?.startsWith('mcp__serena__')) return;
+        const entry = {
+          id: evt.id,
+          name: evt.name,
+          input: evt.input || {},
+          // Truncate result for transport — full result cached below
+          resultPreview: (evt.result || '').slice(0, 4000),
+          resultLength: (evt.result || '').length,
+          isError: !!evt.isError,
+          ts: Date.now(),
+        };
+        toolCalls.push(entry);
+        taggedBroadcast({ type: 'chat_tool_result', agentId, ...entry });
       },
       // Sonnet by default, Opus on request. `profile` also carries
       // `lightweight: true` so runAgent skips the per-turn Serena
@@ -809,6 +835,7 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       cost: result.cost,
       cacheHits: { read: result.tokens.cacheRead, creation: result.tokens.cacheCreation },
       fileChanges: editedFilesArr,
+      toolCalls,
     });
     taggedBroadcast({
       type: 'agent_complete',
@@ -828,6 +855,7 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       cachedNew: result.tokens.cacheCreation,
       cost: result.cost,
       fileChanges: editedFilesArr,
+      toolCalls,
     };
   } catch (err) {
     task.done = true;
@@ -942,7 +970,7 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
   const {
     prompt, cwd, systemPrompt, tools, schema, maxTurns,
     model, effort, thinking, fallbackModel,
-    onToolUse, resume, permissionMode, silent,
+    onToolUse, onToolResult, resume, permissionMode, silent,
     focusFiles, lightweight,
   } = opts;
 
@@ -951,6 +979,11 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
 
   const recentTools = [];
   let stuckDetected = false;
+
+  // Track open tool_use blocks so we can match them with tool_result
+  // blocks that arrive in subsequent `user` messages. Used by the
+  // chat panel to show inline tool results ("Read(foo.js) → 42 lines").
+  const pendingToolUses = new Map(); // toolUseId → {name, input}
 
   // Mount Hexis-specific MCP tools (always) + Serena (unless lightweight).
   // Lightweight mode is for fast zero-tool roles (Writer, Classifier) where
@@ -1056,6 +1089,14 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
             const toolName = block.name;
             const input = block.input || {};
 
+            // Remember this tool_use so we can match it with its
+            // tool_result when the model's next `user` message
+            // arrives. Used for the chat panel's inline tool-result
+            // cards (onToolResult callback below).
+            if (onToolResult && block.id) {
+              pendingToolUses.set(block.id, { name: toolName, input });
+            }
+
             // Stuck detection
             const sig = `${toolName}|${JSON.stringify(input).slice(0, 200)}`;
             recentTools.push(sig);
@@ -1099,6 +1140,43 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
           totalTokens.output += usage.output_tokens || 0;
           totalTokens.cacheCreation += usage.cache_creation_input_tokens || 0;
           totalTokens.cacheRead += usage.cache_read_input_tokens || 0;
+        }
+      }
+
+      // Tool results arrive as `user` messages containing
+      // `tool_result` blocks keyed by the tool_use id from a prior
+      // assistant message. Match them to the stored pending uses
+      // and fire the onToolResult callback. Used by chat mode to
+      // render inline tool-result cards.
+      if (message.type === 'user' && message.message?.content && onToolResult) {
+        const content = message.message.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block?.type === 'tool_result' && block.tool_use_id) {
+              const pending = pendingToolUses.get(block.tool_use_id);
+              if (!pending) continue;
+              pendingToolUses.delete(block.tool_use_id);
+              // tool_result.content may be a string or an array of
+              // content parts (text | image). Extract plain text.
+              let resultText = '';
+              if (typeof block.content === 'string') {
+                resultText = block.content;
+              } else if (Array.isArray(block.content)) {
+                resultText = block.content
+                  .map(p => typeof p === 'string' ? p : (p?.text || ''))
+                  .join('');
+              }
+              try {
+                onToolResult({
+                  id: block.tool_use_id,
+                  name: pending.name,
+                  input: pending.input,
+                  result: resultText,
+                  isError: !!block.is_error,
+                });
+              } catch { /* swallow handler errors */ }
+            }
+          }
         }
       }
 

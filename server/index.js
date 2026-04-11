@@ -1064,6 +1064,51 @@ app.get('/api/memory/learned', async (_req, res) => {
   }
 });
 
+// Search learned.md for rules matching a query. Used by /mem search
+// in chat and by the auto-inject context header. Returns the top N
+// matching rules by simple keyword score. Each rule is a single
+// markdown bullet; we split on `\n- ` and rank by how many query
+// terms appear in it (case-insensitive).
+// Query: ?q=<text>&limit=5
+app.get('/api/memory/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  const limit = Math.max(1, Math.min(20, parseInt(req.query.limit || '5', 10)));
+  if (!q) return res.json({ results: [] });
+  try {
+    const { readFile } = await import('fs/promises');
+    const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
+    let content = '';
+    try { content = await readFile(path, 'utf-8'); } catch { return res.json({ results: [] }); }
+
+    // Extract bullet rules (lines starting with `- `)
+    const rules = [];
+    for (const line of content.split(/\r?\n/)) {
+      const m = /^\s*-\s+(.+)$/.exec(line);
+      if (m) rules.push(m[1]);
+    }
+
+    // Token-level match with a score; dedupe stopwords and short tokens
+    const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'on', 'with', 'is', 'are', 'be']);
+    const terms = q.toLowerCase().split(/\s+/).filter(t => t.length > 2 && !STOP.has(t));
+    if (terms.length === 0) return res.json({ results: [] });
+
+    const scored = rules.map(rule => {
+      const lower = rule.toLowerCase();
+      let score = 0;
+      for (const t of terms) {
+        if (lower.includes(t)) score += 1;
+      }
+      return { rule, score };
+    }).filter(r => r.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+
+    res.json({ results: scored });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Append a rule to .hexis/memories/learned.md. Used by the chat
 // "star to memory" button and future programmatic memory ops.
 // Body: { rule: string, source?: 'chat' | 'user' | 'task' }

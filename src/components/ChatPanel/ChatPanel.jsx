@@ -231,6 +231,15 @@ export default function ChatPanel() {
       }
     }
 
+    // Esc while a turn is streaming → cancel it and preserve the
+    // partial response. Swallowed here so the global Esc→focus
+    // handler in App.jsx doesn't also fire.
+    if (e.key === 'Escape' && sending) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelSend();
+      return;
+    }
     // Enter sends, Shift+Enter adds newline
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -626,6 +635,8 @@ export default function ChatPanel() {
               fileChanges={m.fileChanges}
               isHandoff={m.isHandoff}
               mentions={m.mentions}
+              toolCalls={m.toolCalls}
+              interrupted={m.interrupted}
               // The Deep review button re-submits the PRECEDING user
               // prompt through the full agent pipeline. Only show it
               // on non-handoff assistant messages where the previous
@@ -794,7 +805,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff, mentions }) {
+function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff, mentions, toolCalls, interrupted }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -826,6 +837,11 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
         {isEmptyStreaming && (
           <span style={{ color: W.accent, opacity: 0.8 }}>
             thinking…
+          </span>
+        )}
+        {interrupted && (
+          <span style={{ color: W.red, opacity: 0.8 }}>
+            ⏸ interrupted — type "continue" to resume
           </span>
         )}
         {!streaming && tokens > 0 && (
@@ -865,6 +881,14 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
           <AssistantBlocks content={content} />
         )}
       </div>
+      {/* Tool calls + results for this turn. Rendered as compact
+          collapsible cards below the assistant text. Each card
+          shows the tool name, input summary, and a preview of the
+          result that expands on click. Skipped for user messages,
+          streaming, and handoff notes. */}
+      {!isUser && !streaming && !isHandoff && toolCalls?.length > 0 && (
+        <ToolCallsList calls={toolCalls} />
+      )}
       {/* Mentions row on user messages — shows which @file references
           got expanded + injected as context for the turn. */}
       {isUser && mentions?.length > 0 && (
@@ -920,6 +944,152 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
       )}
     </div>
   );
+}
+
+// Renders the list of tool call + result cards under an assistant
+// message. Each card starts collapsed with a one-line summary and
+// expands on click to show the full preview.
+function ToolCallsList({ calls }) {
+  return (
+    <div style={{
+      marginTop: W.s2,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: W.s1,
+      maxWidth: '85%',
+    }}>
+      {calls.map((c, i) => (
+        <ToolCallCard key={c.id || i} call={c} />
+      ))}
+    </div>
+  );
+}
+
+function ToolCallCard({ call }) {
+  const [expanded, setExpanded] = useState(false);
+  const { name, input, resultPreview, resultLength, isError } = call;
+
+  // Human-friendly single-line summary for the collapsed view.
+  // Different tools have different "interesting" input fields.
+  const summary = (() => {
+    if (name === 'Read') return input.file_path || input.path || '';
+    if (name === 'Write' || name === 'Edit' || name === 'NotebookEdit') {
+      return input.file_path || input.path || input.notebook_path || '';
+    }
+    if (name === 'Bash') return input.command || '';
+    if (name === 'Glob') return input.pattern || '';
+    if (name === 'Grep') return `${input.pattern || ''}${input.path ? ` in ${input.path}` : ''}`;
+    if (name?.startsWith('mcp__hexis__')) return name.replace('mcp__hexis__', '');
+    return JSON.stringify(input).slice(0, 80);
+  })();
+
+  // Nice icon / label for the tool name
+  const displayName = (() => {
+    if (name === 'Read') return 'Read';
+    if (name === 'Write') return 'Write';
+    if (name === 'Edit') return 'Edit';
+    if (name === 'NotebookEdit') return 'NotebookEdit';
+    if (name === 'Bash') return 'Bash';
+    if (name === 'Glob') return 'Glob';
+    if (name === 'Grep') return 'Grep';
+    if (name?.startsWith('mcp__hexis__')) return 'Hexis';
+    return name || 'Tool';
+  })();
+
+  // Result preview: for Read, try to show the file content as code
+  // (with the monospace look). For everything else, show raw text.
+  const looksLikeCode = ['Read', 'Write', 'Edit'].includes(name) ||
+                       (resultPreview || '').split('\n').length > 3;
+
+  return (
+    <div style={{
+      background: 'rgba(0, 0, 0, 0.28)',
+      border: `1px solid ${isError ? W.red : W.border}`,
+      borderRadius: W.radius1,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 12,
+      overflow: 'hidden',
+    }}>
+      {/* Header — always visible, clickable to expand/collapse */}
+      <button
+        onClick={() => setExpanded(v => !v)}
+        style={{
+          width: '100%',
+          padding: `${W.s1}px ${W.s2}px`,
+          background: 'transparent',
+          border: 'none',
+          color: W.text,
+          fontSize: 12,
+          fontFamily: 'inherit',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: W.s2,
+          textAlign: 'left',
+        }}
+      >
+        <span style={{
+          color: isError ? W.red : W.accent,
+          fontWeight: W.fontWeightSemi,
+          flexShrink: 0,
+        }}>
+          {expanded ? '▾' : '▸'} {displayName}
+        </span>
+        <span style={{
+          flex: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          color: W.textMuted,
+        }}>
+          {summary}
+        </span>
+        <span style={{ color: W.textDim, fontSize: 10, flexShrink: 0 }}>
+          {resultLength > 0 ? `${formatBytes(resultLength)}` : ''}
+          {isError ? ' · ERROR' : ''}
+        </span>
+      </button>
+
+      {/* Body — only rendered when expanded. Shows the result preview
+          up to ~4 KB; tells the user if more was truncated. */}
+      {expanded && (
+        <div style={{
+          padding: `${W.s2}px ${W.s3}px`,
+          borderTop: `1px solid ${W.border}`,
+          background: 'rgba(0, 0, 0, 0.2)',
+          maxHeight: 320,
+          overflowY: 'auto',
+        }}>
+          <pre style={{
+            margin: 0,
+            whiteSpace: 'pre',
+            overflowX: 'auto',
+            color: W.text,
+            fontSize: looksLikeCode ? 11.5 : 12,
+            lineHeight: 1.45,
+          }}>
+            {resultPreview || '(no output)'}
+          </pre>
+          {resultLength > (resultPreview?.length || 0) && (
+            <div style={{
+              marginTop: W.s2,
+              fontSize: 11,
+              color: W.textDim,
+              fontFamily: W.fontFamily,
+            }}>
+              … {formatBytes(resultLength - (resultPreview?.length || 0))} more truncated
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(n) {
+  if (!n || n < 1024) return `${n || 0}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function MessageActions({ isUser, content, priorUserMessage }) {
@@ -1316,6 +1486,7 @@ const SLASH_HINTS = [
   { cmd: '/research', desc: 'deep 6-phase research pipeline' },
   { cmd: '/task',     desc: 'full agent pipeline with Critic review' },
   { cmd: '/compact',  desc: 'summarize older turns to free context' },
+  { cmd: '/mem search', desc: 'search project memory (learned.md)' },
   { cmd: '/clear',    desc: 'wipe this chat and start fresh' },
   { cmd: '/model',    desc: 'switch model (sonnet | opus)' },
   { cmd: '/help',     desc: 'show all commands and shortcuts' },

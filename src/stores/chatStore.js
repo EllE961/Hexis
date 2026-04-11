@@ -85,6 +85,8 @@ function saveChats(chats, activeId) {
           fileChanges: m.fileChanges,
           mentions: m.mentions,
           isHandoff: m.isHandoff,
+          toolCalls: m.toolCalls,
+          interrupted: m.interrupted,
         })),
       };
     }
@@ -329,6 +331,44 @@ export const useChatStore = create((set, get) => ({
       });
       return;
     }
+    const memSearchMatch = /^\/mem\s+search\s+([\s\S]+)$/i.exec(text);
+    if (memSearchMatch) {
+      const q = memSearchMatch[1].trim();
+      if (!q) return;
+      try {
+        const res = await fetch(`/api/memory/search?q=${encodeURIComponent(q)}&limit=10`);
+        const data = await res.json();
+        const results = data.results || [];
+        const reply = results.length === 0
+          ? `No memory rules match **"${q}"**. Try a broader query or star some messages with the ★ button to seed memory.`
+          : `Top ${results.length} memory ${results.length === 1 ? 'rule' : 'rules'} for **"${q}"**:\n\n${results.map(r => `- ${r.rule}`).join('\n')}`;
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = {
+            ...c,
+            messages: [
+              ...c.messages,
+              { role: 'user', content: text, ts: Date.now() },
+              { role: 'assistant', content: reply, ts: Date.now(), isHandoff: true },
+            ],
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      } catch (err) {
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = { ...c, error: err.message || String(err) };
+          return { chats };
+        });
+      }
+      return;
+    }
+
     if (/^\/compact(?:\s|$)/i.test(text)) {
       // Summarize all but the most recent 2 turns (4 messages) into
       // a single "earlier conversation" block, then reset the session
@@ -535,20 +575,25 @@ export const useChatStore = create((set, get) => ({
     // - Recently changed files: the top 5 from git working tree.
     //   Keeps the agent aware of in-flight changes so its
     //   recommendations don't conflict.
+    // - Relevant memory rules: top 3 matches against learned.md.
+    //   Injected every turn (cheap — it's just a small text block,
+    //   and the prompt cache handles repeats).
     //
-    // This only fires on the FIRST turn of each session (when
-    // sessionId is null) — the cached preamble carries it forward
-    // across subsequent turns at near-zero token cost.
+    // Editor + git are only injected on the FIRST turn of each
+    // session (when sessionId is null) — cached preamble carries
+    // them forward across subsequent turns at zero token cost.
+    // Memory rules re-inject every turn because the "relevant"
+    // set depends on the specific prompt.
     let contextHeader = '';
+    const contextParts = [];
     if (!chat.sessionId) {
       try {
         const { useEditorStore } = await import('./editorStore.js');
         const { useGitStore } = await import('./gitStore.js');
         const editor = useEditorStore.getState();
         const git = useGitStore.getState();
-        const parts = [];
         if (editor.activeTab) {
-          parts.push(`**Currently viewing**: \`${editor.activeTab}\``);
+          contextParts.push(`**Currently viewing**: \`${editor.activeTab}\``);
         }
         const changed = [
           ...(git.staged || []),
@@ -556,14 +601,33 @@ export const useChatStore = create((set, get) => ({
           ...(git.untracked || []),
         ].slice(0, 5);
         if (changed.length > 0) {
-          parts.push(`**Recently changed** (uncommitted): ${changed.map(f => `\`${f}\``).join(', ')}`);
-        }
-        if (parts.length > 0) {
-          contextHeader =
-            `[session context — auto-injected once per session, don't re-fetch these]\n` +
-            parts.join('\n') + '\n\n---\n\n';
+          contextParts.push(`**Recently changed** (uncommitted): ${changed.map(f => `\`${f}\``).join(', ')}`);
         }
       } catch {}
+    }
+    // Memory rules — auto-inject the top 3 for the current prompt.
+    // Only fires if the user's message has >= 2 meaningful words.
+    try {
+      const meaningful = text.trim().split(/\s+/).filter(w => w.length > 3).length;
+      if (meaningful >= 2) {
+        const res = await fetch(
+          `/api/memory/search?q=${encodeURIComponent(text.slice(0, 200))}&limit=3`,
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const rules = (data.results || []).map(r => `- ${r.rule}`);
+          if (rules.length > 0) {
+            contextParts.push(
+              `**Project conventions (from learned.md, matched to your prompt):**\n${rules.join('\n')}`,
+            );
+          }
+        }
+      }
+    } catch {}
+    if (contextParts.length > 0) {
+      contextHeader =
+        `[session context — don't re-fetch, these are injected automatically]\n` +
+        contextParts.join('\n\n') + '\n\n---\n\n';
     }
 
     // Detect @file mentions and expand them to real content.
@@ -679,6 +743,7 @@ export const useChatStore = create((set, get) => ({
           cachedNew: data.cachedNew || 0,
           cost: data.cost || 0,
           fileChanges: data.fileChanges || [],
+          toolCalls: data.toolCalls || [],
         };
         // Auto-title from first user message while title is still default
         const title = (c.title === 'Main chat' || c.title === 'New chat') && c.messages.length <= 2
@@ -720,11 +785,32 @@ export const useChatStore = create((set, get) => ({
         body: JSON.stringify({ chatId }),
       });
     } catch {}
+    // Preserve the partial response as a finished assistant message
+    // so the user can read it AND the next `continue` turn can
+    // resume from that context. We append the partial streamBuffer
+    // as an `interrupted: true` message so the UI can style it
+    // differently.
     set(state => {
       const chats = { ...state.chats };
-      if (chats[chatId]) {
-        chats[chatId] = { ...chats[chatId], sending: false };
+      const c = chats[chatId];
+      if (!c) return state;
+      const partial = c.streamBuffer || '';
+      const messages = [...c.messages];
+      if (partial.trim()) {
+        messages.push({
+          role: 'assistant',
+          content: partial,
+          ts: Date.now(),
+          interrupted: true,
+        });
       }
+      chats[chatId] = {
+        ...c,
+        sending: false,
+        streamBuffer: '',
+        messages,
+      };
+      saveChats(chats, state.activeId);
       return { chats };
     });
     emitChatBridge({ type: 'chat_finished', chatId, cancelled: true });

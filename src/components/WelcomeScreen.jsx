@@ -8,7 +8,7 @@
 
 import { useWorkspaceStore } from '../stores/workspaceStore.js';
 import { W } from '../theme/window-tokens.js';
-import { FolderOpen, Clock, X } from 'lucide-react';
+import { Icon } from './common/Icon.jsx';
 
 const IS_TAURI = typeof window !== 'undefined' && window.__TAURI_INTERNALS__;
 
@@ -115,7 +115,7 @@ export default function WelcomeScreen({ onOpen }) {
                 flexShrink: 0,
               }}
             >
-              <FolderOpen size={18} />
+              <Icon name="folder-opened" size={W.iconMd} color="inherit" />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: W.fontLg, fontWeight: W.fontWeightSemi, marginBottom: 2 }}>
@@ -182,7 +182,7 @@ hexis . --port 4000`}
                 gap: W.s2,
               }}
             >
-              <Clock size={11} /> Recent workspaces
+              <Icon name="history" size={W.iconSm} color="inherit" /> Recent workspaces
             </div>
             <div
               style={{
@@ -253,7 +253,7 @@ hexis . --port 4000`}
                         display: 'flex',
                       }}
                     >
-                      <X size={11} />
+                      <Icon name="close" size={W.iconSm} color="inherit" />
                     </button>
                   </div>
                 );

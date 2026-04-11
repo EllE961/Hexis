@@ -33,7 +33,10 @@ import {
 } from './hexMath.js';
 
 const HEX_SIZE = 30;
-const MAX_RING = 12;
+// Max hex ring for any single group. Ring 24 = 1801 cells, plenty of headroom
+// for even deeply-nested real-world projects. The packing rarely approaches
+// this — it's a safety valve, not an expected bound.
+const MAX_RING = 24;
 const SQRT3 = Math.sqrt(3);
 
 // ─── Stage 1: Build forest ────────────────────────────────────────────────────
@@ -122,7 +125,11 @@ function sizeOnlyPass(box) {
   while (!tryPack(box, 0, 0, ring, null)) {
     ring++;
     if (ring > MAX_RING) {
-      throw new Error(`hex layout: ring > ${MAX_RING} at ${box.path}`);
+      throw new Error(
+        `hex layout: ring > ${MAX_RING} at ${box.path} ` +
+        `(${box.children.length} child groups [biggest=ring ${maxChildRing}], ` +
+        `${directCount} direct files, needed ≥${requiredCells} cells)`
+      );
     }
   }
   box.ring = ring;
@@ -131,31 +138,26 @@ function sizeOnlyPass(box) {
 // ─── tryPack: feasibility test + position writer ─────────────────────────────
 
 /**
- * Attempt to place all `box.children` inside a hex of ring R centered at
- * (cq, cr). Writes successful positions into `child.cq, child.cr`.
- * Returns true on success, false if caller should grow R and retry.
+ * Greedy-place the REST of the children (biggest already placed) starting
+ * from `placed` positions. Returns an array of chosen positions on success,
+ * or null on failure. Does not mutate `placed`.
  *
- * Strategy:
- *   • Sort children by ring descending (biggest first — most constrained)
- *   • Honour `savedHints.get(path)` if the hint is still valid
- *   • Else spiral INWARD from the parent's rim (farthest-from-center
- *     first). This yields two wins:
- *       1. Packing feasibility: center-first greedy fails for some
- *          feasible configs because sibling non-overlap requires distance
- *          ≥ r_a + r_b + 1 > containment distance from center. Outside-in
- *          finds those configs.
- *       2. Visual: sub-groups ring around the edge, leaving the parent's
- *          center free for its direct files. Matches the honeycomb aesthetic.
- *   • Non-overlap test: hexDistance(c_a, c_b) ≥ r_a + r_b + 1  (O(1))
- *   • Verify `freeCells ≥ directFiles + 1` after children occupy theirs
+ * Strategy: outside-in spiral (d = maxDist → 0). Rim-first minimizes
+ * mutual conflicts between similarly-sized siblings (they each grab
+ * their own slice of the outer annulus). With the biggest child
+ * enumerated separately by the caller, this is the best trade-off:
+ *   • One dominant + small siblings: caller offsets biggest, rest
+ *     spiral around the rim — still tight because the annulus is thin.
+ *   • Many equal siblings: caller pins biggest at d=0, rest spread
+ *     evenly around the rim — which is essential when there's no
+ *     single dominant child.
  */
-function tryPack(box, cq, cr, R, savedHints) {
-  const children = [...box.children].sort((a, b) => b.ring - a.ring);
-  const placed = [];
-
+function placeRest(children, cq, cr, R, placed, savedHints) {
+  const positions = [];
+  const working = [...placed];
   for (const child of children) {
     const maxDist = R - child.ring;
-    if (maxDist < 0) return false;
+    if (maxDist < 0) return null;
 
     let chosen = null;
 
@@ -165,7 +167,7 @@ function tryPack(box, cq, cr, R, savedHints) {
         const [hq, hr] = hint;
         if (hexDistance(cq, cr, hq, hr) <= maxDist) {
           let ok = true;
-          for (const p of placed) {
+          for (const p of working) {
             if (hexDistance(hq, hr, p.cq, p.cr) < child.ring + p.ring + 1) {
               ok = false;
               break;
@@ -177,12 +179,11 @@ function tryPack(box, cq, cr, R, savedHints) {
     }
 
     if (!chosen) {
-      // Outside-in spiral: iterate from maxDist down to 0
-      for (let d = maxDist; d >= 0 && !chosen; d--) {
+      outer: for (let d = maxDist; d >= 0; d--) {
         const ring = cellsAtDistance(cq, cr, d);
         for (const c of ring) {
           let ok = true;
-          for (const p of placed) {
+          for (const p of working) {
             if (hexDistance(c.q, c.r, p.cq, p.cr) < child.ring + p.ring + 1) {
               ok = false;
               break;
@@ -190,26 +191,119 @@ function tryPack(box, cq, cr, R, savedHints) {
           }
           if (ok) {
             chosen = c;
-            break;
+            break outer;
           }
         }
       }
     }
 
-    if (!chosen) return false;
-    child.cq = chosen.q;
-    child.cr = chosen.r;
-    placed.push({ cq: chosen.q, cr: chosen.r, ring: child.ring });
+    if (!chosen) return null;
+    positions.push(chosen);
+    working.push({ cq: chosen.q, cr: chosen.r, ring: child.ring });
+  }
+  return positions;
+}
+
+/**
+ * Attempt to place all `box.children` inside a hex of ring R centered at
+ * (cq, cr). Writes successful positions into `child.cq, child.cr`.
+ * Returns true on success, false if caller should grow R and retry.
+ *
+ * Two-level search:
+ *   1. ENUMERATE positions for the BIGGEST child from center outward
+ *      (d = 0, 1, 2, …). This is the key: pinning biggest to center
+ *      forces small siblings to the rim (waste), while a tiny offset
+ *      (d = 1–3) lets siblings crowd into the opposite annulus,
+ *      cutting the required parent ring by 1–2.
+ *   2. For each biggest position, greedy-pack the rest INSIDE-OUT
+ *      (via `placeRest`) so smaller children hug the parent center
+ *      too. This minimizes donut holes around the big child.
+ *
+ * `savedHints` shortcuts both searches with the previous frame's
+ * positions when they're still valid (visual stability across tree
+ * changes).
+ *
+ * Non-overlap test: hexDistance(c_a, c_b) ≥ r_a + r_b + 1  (O(1))
+ * Final check: freeCells ≥ directFiles + 1 (the landing-zone rule).
+ */
+function tryPack(box, cq, cr, R, savedHints) {
+  const children = [...box.children].sort((a, b) => b.ring - a.ring);
+
+  if (children.length === 0) {
+    // Just files + landing zone
+    return hexCellCount(R) >= box.directFiles.length + 1;
   }
 
-  // Verify ≥1 empty slot after children occupy their cells
-  const occupied = new Set();
-  for (const p of placed) {
-    for (const cell of getHexDisk(p.cq, p.cr, p.ring)) {
+  const biggest = children[0];
+  const rest = children.slice(1);
+  const biggestMaxDist = R - biggest.ring;
+  if (biggestMaxDist < 0) return false;
+
+  // Build biggest-position candidates: saved hint first (stability),
+  // then center-outward spiral.
+  //
+  // The enumeration window is capped at min(biggestMaxDist, 4). The
+  // useful density wins all come from d ∈ {0..3}: that range is where
+  // "slightly off-center" can save a ring for one-dominant-child cases
+  // (e.g. src with a giant components sibling). Beyond d = 4, the
+  // biggest is so far from center that it's equivalent to the old
+  // outside-in behaviour — and the candidate count explodes (~O(d²))
+  // with no further benefit. Capping here keeps tryPack O(R²·N) rather
+  // than O(R⁴·N), which matters for 100+ group trees.
+  const DMAX = Math.min(biggestMaxDist, 4);
+  const biggestCandidates = [];
+  const seen = new Set();
+  const pushUnique = (q, r) => {
+    const k = `${q},${r}`;
+    if (seen.has(k)) return;
+    if (hexDistance(cq, cr, q, r) > biggestMaxDist) return;
+    seen.add(k);
+    biggestCandidates.push({ q, r });
+  };
+
+  if (savedHints) {
+    const hint = savedHints.get(biggest.path);
+    if (hint) pushUnique(hint[0], hint[1]);
+  }
+  for (let d = 0; d <= DMAX; d++) {
+    for (const c of cellsAtDistance(cq, cr, d)) pushUnique(c.q, c.r);
+  }
+  // Fallback: if the capped search fails, the caller grows R. But if
+  // biggestMaxDist > DMAX, also include one rim candidate (d = maxDist)
+  // so we match the old outside-in behaviour and never regress.
+  if (biggestMaxDist > DMAX) {
+    for (const c of cellsAtDistance(cq, cr, biggestMaxDist)) pushUnique(c.q, c.r);
+  }
+
+  for (const bpos of biggestCandidates) {
+    const placed = [{ cq: bpos.q, cr: bpos.r, ring: biggest.ring }];
+    const restPositions = placeRest(rest, cq, cr, R, placed, savedHints);
+    if (!restPositions) continue;
+
+    // Verify landing-zone rule (≥1 empty cell beyond direct files)
+    const occupied = new Set();
+    for (const cell of getHexDisk(bpos.q, bpos.r, biggest.ring)) {
       occupied.add(`${cell.q},${cell.r}`);
     }
+    for (let i = 0; i < rest.length; i++) {
+      const rp = restPositions[i];
+      for (const cell of getHexDisk(rp.q, rp.r, rest[i].ring)) {
+        occupied.add(`${cell.q},${cell.r}`);
+      }
+    }
+    if (hexCellCount(R) - occupied.size < box.directFiles.length + 1) continue;
+
+    // Commit positions
+    biggest.cq = bpos.q;
+    biggest.cr = bpos.r;
+    for (let i = 0; i < rest.length; i++) {
+      rest[i].cq = restPositions[i].q;
+      rest[i].cr = restPositions[i].r;
+    }
+    return true;
   }
-  return hexCellCount(R) - occupied.size >= box.directFiles.length + 1;
+
+  return false;
 }
 
 // ─── Stage 3: Place (top-down) ────────────────────────────────────────────────
@@ -287,7 +381,10 @@ function placeSubtree(box, savedHints) {
   while (!tryPack(box, box.cq, box.cr, ring, savedHints)) {
     ring++;
     if (ring > MAX_RING) {
-      throw new Error(`hex layout: ring > ${MAX_RING} at ${box.path}`);
+      throw new Error(
+        `hex layout: ring > ${MAX_RING} at ${box.path} ` +
+        `(placeSubtree: ${box.children.length} child groups, ${box.directFiles.length} direct files)`
+      );
     }
   }
   box.ring = ring;

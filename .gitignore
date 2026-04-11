@@ -22,12 +22,17 @@ Thumbs.db
 .serena/cache/
 .serena/project.local.yml
 
-# Hexis runtime memory — research reports are generated per-run.
-# learned.md is seeded conventions and IS versioned. Research reports
-# under research/ are runtime artifacts and should not pollute history.
-.hexis/memories/research/
-.hexis/memories/runs/
-.hexis/state-*.json
-
-# Per-workspace hex layout state — regenerated on demand, not source.
+# ─── Hexis IDE runtime artifacts ───
+# Everything Hexis writes into a project's `.hexis/` folder that's
+# regenerated on demand. If you use Hexis on YOUR project, copy this
+# block into your project's .gitignore.
+#
+# Kept (versioned): .hexis/memories/learned.md — cross-run conventions
+# hex grid group positions cache
 .hexis/layout.json
+# per-agent-run state snapshots
+.hexis/state-*.json
+# generated per-run research reports
+.hexis/memories/research/
+# episodic memory per run
+.hexis/memories/runs/

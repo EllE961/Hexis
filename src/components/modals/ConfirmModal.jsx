@@ -19,7 +19,7 @@
 
 import { useEffect, useRef } from 'react';
 import { W } from '../../theme/window-tokens.js';
-import { AlertTriangle, Move } from 'lucide-react';
+import { Icon } from '../common/Icon.jsx';
 
 export default function ConfirmModal({
   open,
@@ -75,7 +75,7 @@ export default function ConfirmModal({
           width: 480,
           maxWidth: '92vw',
           background: W.bg1,
-          border: `1px solid ${destructive ? 'rgba(239, 68, 68, 0.5)' : W.borderHi}`,
+          border: `1px solid ${destructive ? W.red : W.borderHi}`,
           borderRadius: W.radius3,
           boxShadow: W.shadow2,
           overflow: 'hidden',
@@ -97,8 +97,8 @@ export default function ConfirmModal({
             style={{
               width: 28,
               height: 28,
-              borderRadius: '50%',
-              background: destructive ? 'rgba(239, 68, 68, 0.15)' : W.accentBg,
+              borderRadius: W.radius2,
+              background: destructive ? W.redBg : W.accentBg,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -106,7 +106,7 @@ export default function ConfirmModal({
               flexShrink: 0,
             }}
           >
-            {destructive ? <AlertTriangle size={15} /> : <Move size={15} />}
+            <Icon name={destructive ? 'warning' : 'file-symlink-file'} size={W.iconMd} color={accent} />
           </div>
           <div
             style={{

@@ -30,7 +30,7 @@ import {
 import { SYMBOL_STYLE } from './symbols.js';
 import OutlinePanel from './OutlinePanel.jsx';
 import AiEditModal from './AiEditModal.jsx';
-import { ChevronRight, ChevronLeft, ChevronLeft as Back, ChevronRight as Fwd, List } from 'lucide-react';
+import { Icon } from '../common/Icon.jsx';
 import { markdown } from '@codemirror/lang-markdown';
 import { javascript } from '@codemirror/lang-javascript';
 import { html } from '@codemirror/lang-html';
@@ -52,7 +52,6 @@ import { shell } from '@codemirror/legacy-modes/mode/shell';
 import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
 import { csharp } from '@codemirror/legacy-modes/mode/clike';
-import { X } from 'lucide-react';
 
 // Build a file:// URI for an absolute path (handles Windows drive letters)
 function toFileUri(absPath) {
@@ -169,7 +168,74 @@ const honeyTheme = EditorView.theme({
   '.ͼm': { color: '#D2A8FF' },       // property: purple
 });
 
-export default function EditorPanel() {
+const EXPLORER_WIDTH_KEY = 'hexis-editor-explorer-width';
+const EXPLORER_COLLAPSED_KEY = 'hexis-editor-explorer-collapsed';
+const EXPLORER_WIDTH_DEFAULT = 240;
+const EXPLORER_WIDTH_MIN = 180;
+const EXPLORER_WIDTH_MAX = 500;
+
+export default function EditorPanel({
+  explorer,
+}) {
+  // `explorer` is an optional React element (the FileTreePanel) rendered
+  // as a collapsible left sidebar. If not supplied, the editor fills its
+  // whole DockPanel (legacy behaviour).
+  const [explorerWidth, setExplorerWidth] = useState(() => {
+    try {
+      const raw = localStorage.getItem(EXPLORER_WIDTH_KEY);
+      const n = raw ? parseInt(raw, 10) : EXPLORER_WIDTH_DEFAULT;
+      return Number.isFinite(n) ? Math.max(EXPLORER_WIDTH_MIN, Math.min(EXPLORER_WIDTH_MAX, n)) : EXPLORER_WIDTH_DEFAULT;
+    } catch { return EXPLORER_WIDTH_DEFAULT; }
+  });
+  const [explorerCollapsed, setExplorerCollapsed] = useState(() => {
+    try { return localStorage.getItem(EXPLORER_COLLAPSED_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(EXPLORER_WIDTH_KEY, String(explorerWidth)); } catch {}
+  }, [explorerWidth]);
+  useEffect(() => {
+    try { localStorage.setItem(EXPLORER_COLLAPSED_KEY, explorerCollapsed ? '1' : '0'); } catch {}
+  }, [explorerCollapsed]);
+
+  // Listen for external toggle requests (e.g. View → Explorer / Ctrl+Shift+E)
+  useEffect(() => {
+    const onToggle = () => setExplorerCollapsed(c => !c);
+    window.addEventListener('hexis:toggle-explorer', onToggle);
+    return () => window.removeEventListener('hexis:toggle-explorer', onToggle);
+  }, []);
+
+  // Divider drag state
+  const dividerDragRef = useRef(null);
+  const onDividerDown = useCallback((e) => {
+    dividerDragRef.current = { startX: e.clientX, startWidth: explorerWidth };
+    e.preventDefault();
+    const onMove = (ev) => {
+      const d = dividerDragRef.current;
+      if (!d) return;
+      const next = Math.max(EXPLORER_WIDTH_MIN, Math.min(EXPLORER_WIDTH_MAX, d.startWidth + (ev.clientX - d.startX)));
+      setExplorerWidth(next);
+    };
+    const onUp = () => {
+      dividerDragRef.current = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [explorerWidth]);
+  const onDividerDouble = useCallback(() => setExplorerWidth(EXPLORER_WIDTH_DEFAULT), []);
+
+  return <EditorPanelInner
+    explorer={explorer}
+    explorerWidth={explorerWidth}
+    explorerCollapsed={explorerCollapsed}
+    setExplorerCollapsed={setExplorerCollapsed}
+    onDividerDown={onDividerDown}
+    onDividerDouble={onDividerDouble}
+  />;
+}
+
+function EditorPanelInner({ explorer, explorerWidth, explorerCollapsed, setExplorerCollapsed, onDividerDown, onDividerDouble }) {
   const tabs = useEditorStore(s => s.tabs);
   const activeTab = useEditorStore(s => s.activeTab);
   const closeTab = useEditorStore(s => s.closeTab);
@@ -512,11 +578,68 @@ export default function EditorPanel() {
 
   return (
     <div
-      className="flex-1 flex flex-col min-w-0 min-h-0"
-      style={{
-        background: W.bg1,
-      }}
+      className="flex-1 flex min-w-0 min-h-0"
+      style={{ background: W.bg1 }}
     >
+      {/* ─── Embedded Explorer sidebar ─── */}
+      {explorer && !explorerCollapsed && (
+        <div
+          style={{
+            width: explorerWidth,
+            minWidth: EXPLORER_WIDTH_MIN,
+            maxWidth: EXPLORER_WIDTH_MAX,
+            flexShrink: 0,
+            borderRight: `1px solid ${W.border}`,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+            background: W.bg1,
+          }}
+        >
+          {explorer}
+        </div>
+      )}
+      {explorer && !explorerCollapsed && (
+        <div
+          onPointerDown={onDividerDown}
+          onDoubleClick={onDividerDouble}
+          title="Drag to resize • Double-click to reset"
+          style={{
+            width: 4,
+            cursor: 'col-resize',
+            background: W.border,
+            flexShrink: 0,
+          }}
+        />
+      )}
+      {explorer && explorerCollapsed && (
+        <button
+          onClick={() => setExplorerCollapsed(false)}
+          title="Show explorer"
+          style={{
+            width: 22,
+            flexShrink: 0,
+            background: W.bg2,
+            border: 'none',
+            borderRight: `1px solid ${W.border}`,
+            color: W.textDim,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            paddingTop: 8,
+            fontSize: 14,
+          }}
+        >
+          ▸
+        </button>
+      )}
+
+      {/* ─── Editor content (tabs + nav + CM6 + outline) ─── */}
+      <div
+        className="flex-1 flex flex-col min-w-0 min-h-0"
+        style={{ background: W.bg1 }}
+      >
       {/* Tab bar */}
       <div
         className="flex-shrink-0 flex items-center overflow-x-auto"
@@ -552,7 +675,7 @@ export default function EditorPanel() {
               style={{ color: W.textGhost }}
               onClick={(e) => { e.stopPropagation(); closeTab(tab.path); }}
             >
-              <X size={12} />
+              <Icon name="close" size={W.iconSm} />
             </span>
             {tab.path === activeTab && (
               <div
@@ -588,7 +711,7 @@ export default function EditorPanel() {
               alignItems: 'center',
             }}
           >
-            <Back size={14} />
+            <Icon name="arrow-left" size={W.icon} />
           </button>
           {/* Forward */}
           <button
@@ -605,7 +728,7 @@ export default function EditorPanel() {
               alignItems: 'center',
             }}
           >
-            <Fwd size={14} />
+            <Icon name="arrow-right" size={W.icon} />
           </button>
 
           {/* Path + cursor breadcrumb chain */}
@@ -666,7 +789,7 @@ export default function EditorPanel() {
               borderRadius: W.radius1,
             }}
           >
-            <List size={14} />
+            <Icon name="list-unordered" size={W.icon} />
           </button>
         </div>
       )}
@@ -790,6 +913,7 @@ export default function EditorPanel() {
           </div>
         </>
       )}
+      </div>
     </div>
   );
 }

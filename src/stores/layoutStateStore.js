@@ -135,7 +135,12 @@ async function removeFromDisk() {
 export const useLayoutStateStore = create((set, get) => ({
   currentWorkspace: null,
   state: null, // { version, groupPositions, groupRings } | null
-  revision: 0, // bumped on every mutation — content-hash cache buster
+  // `revision` is ONLY bumped by `setWorkspace` (new workspace loaded) and
+  // `clear` (hard refresh). It is NOT bumped by routine `save` calls —
+  // otherwise every layout compute would ping-pong through a second
+  // useEffect run and cause the hex grid to "double rebuild" on each
+  // file edit / save / drop.
+  revision: 0,
 
   /** Switch workspace — loads state from localStorage, falls back to disk. */
   setWorkspace: async (workspace) => {
@@ -156,7 +161,7 @@ export const useLayoutStateStore = create((set, get) => ({
   save: (newState) => {
     if (!newState) return;
     const s = get();
-    // Cheap equality check on serialized size to avoid redundant writes
+    // Cheap equality check to avoid redundant writes + stable references
     const prevSize = s.state
       ? Object.keys(s.state.groupPositions || {}).length
       : 0;
@@ -167,7 +172,8 @@ export const useLayoutStateStore = create((set, get) => ({
 
     saveToLocalStorage(s.currentWorkspace, newState);
     saveToDisk(newState); // fire-and-forget
-    set({ state: newState, revision: s.revision + 1 });
+    // Update state silently — do NOT bump revision (see comment above).
+    set({ state: newState });
   },
 
   /** Hard refresh: wipe state so the next compute runs from scratch. */

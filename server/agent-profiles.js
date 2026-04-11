@@ -71,11 +71,17 @@ export const PROFILES = {
   // Same models / tools / hooks as the Coder, but driven turn-by-turn from
   // the Chat panel instead of a one-shot task. This is the "Claude Code
   // directly, inside Hexis" mode.
+  //
+  // NOTE on fallbackModel: the Claude Agent SDK throws
+  // "Fallback model cannot be the same as the main model" if both fields
+  // match. Sonnet has no sensible fallback (Haiku is a major step down
+  // in capability) — so we leave fallbackModel OFF. If Sonnet is
+  // overloaded the SDK will surface an overload error and the user can
+  // retry, same as VS Code's native Claude Code flow.
   chat: {
     model: 'sonnet',
     effort: 'high',
     maxTurns: 40,                   // enough for a single turn's tool chain
-    fallbackModel: 'sonnet',
   },
   chat_opus: {
     model: 'opus',

@@ -3,14 +3,14 @@
  *
  * Every reversible file operation (move, rename, create, delete of
  * trashed items) pushes a record onto the undoStack. Ctrl+Z applies
- * the inverse and moves the record to the redoStack. Ctrl+Y replays
- * it back.
+ * the inverse and moves the record to the redoStack. Ctrl+Shift+Z /
+ * Ctrl+Y replays it back.
  *
  * Operation shapes:
  *   { kind: 'move',   fromPath, toPath, entity: 'file'|'folder' }
  *   { kind: 'create', path, entity: 'file'|'folder', content? }
  *   { kind: 'delete', path, entity: 'file'|'folder', content? }
- *   { kind: 'batch',  ops: [ ... ] }  // paste / multi-move
+ *   { kind: 'batch',  ops: [ ... ] }  // paste / multi-move / delete-folder
  *
  * The inverse of:
  *   move   → move(to → from)
@@ -18,44 +18,160 @@
  *   delete → create(path, content)  // only if content was captured
  *   batch  → reverse each op in reverse order
  *
- * Deletes of untrashed files can be undone ONLY if we captured the
- * content before deletion. That's the `deleteRecoverable` path — we
- * read the file content before unlinking. For folders or untrusted
- * (binary) files we push a non-undoable sentinel that blocks undo
- * past that point (same behavior as VS Code).
+ * Persistence:
+ *   Per-workspace undo/redo stacks are saved to localStorage under
+ *   `hexis-history:<workspace>`. Total serialized size capped at ~5 MB.
+ *   When persisting would exceed the cap, we drop oldest entries until
+ *   it fits. This means Ctrl+Z survives reloads (a VS-Code feature that
+ *   doesn't even exist in VS Code for file ops — Hexis goes further).
+ *
+ * Delete-content capture:
+ *   The App.jsx delete paths read file content BEFORE unlinking and
+ *   pass it here via `push({kind:'delete', content, ...})`. Content
+ *   larger than MAX_CONTENT_BYTES is stored as `null` with an
+ *   `unrestorable: true` flag — undo of those ops shows a toast and
+ *   skips the restoration.
+ *
+ * Folder deletes:
+ *   A folder delete is pushed as a `batch` containing a `delete` for
+ *   every file in the subtree, so one Ctrl+Z restores the whole tree.
+ *   The folder itself is not in the batch — directories are implicit
+ *   from file paths (create-file mkdir -p's the parent).
  */
 
 import { create } from 'zustand';
 
-const MAX_HISTORY = 100;
+const MAX_HISTORY = 200;
+const STORAGE_PREFIX = 'hexis-history:';
+const MAX_STORAGE_BYTES = 5 * 1024 * 1024; // 5 MB total cap per workspace
+export const MAX_CONTENT_BYTES = 1 * 1024 * 1024; // 1 MB per file for content capture
+
+function storageKey(workspace) {
+  return STORAGE_PREFIX + (workspace || 'default');
+}
+
+function loadFromStorage(workspace) {
+  try {
+    const raw = localStorage.getItem(storageKey(workspace));
+    if (!raw) return { undoStack: [], redoStack: [] };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { undoStack: [], redoStack: [] };
+    return {
+      undoStack: Array.isArray(parsed.undoStack) ? parsed.undoStack : [],
+      redoStack: Array.isArray(parsed.redoStack) ? parsed.redoStack : [],
+    };
+  } catch {
+    return { undoStack: [], redoStack: [] };
+  }
+}
+
+function saveToStorage(workspace, undoStack, redoStack) {
+  try {
+    // Serialize and drop oldest entries until we fit under the cap
+    let u = [...undoStack];
+    let r = [...redoStack];
+    for (let tries = 0; tries < 50; tries++) {
+      const json = JSON.stringify({ undoStack: u, redoStack: r });
+      if (json.length <= MAX_STORAGE_BYTES) {
+        localStorage.setItem(storageKey(workspace), json);
+        return;
+      }
+      // Drop the oldest entry (undo-stack front) first, then redo-stack front
+      if (u.length > 0) u = u.slice(1);
+      else if (r.length > 0) r = r.slice(1);
+      else break;
+    }
+  } catch {
+    /* quota exceeded or private mode — drop silently */
+  }
+}
+
+function removeFromStorage(workspace) {
+  try { localStorage.removeItem(storageKey(workspace)); } catch {}
+}
+
+/** Label an op for the UI (menu items, history panel). */
+export function labelForOp(op) {
+  if (!op) return '';
+  if (op.kind === 'batch') {
+    const first = op.ops?.[0];
+    const n = op.ops?.length || 0;
+    return `${n} item${n === 1 ? '' : 's'}${first ? ' — ' + labelForOp(first) : ''}`;
+  }
+  const leaf = (p) => (p || '').split('/').pop() || p;
+  switch (op.kind) {
+    case 'move': {
+      const fromLeaf = leaf(op.fromPath);
+      const toLeaf = leaf(op.toPath);
+      return fromLeaf === toLeaf
+        ? `Move ${fromLeaf}`
+        : `Rename ${fromLeaf} → ${toLeaf}`;
+    }
+    case 'create': return `Create ${leaf(op.path)}`;
+    case 'delete': return `Delete ${leaf(op.path)}`;
+    default: return op.kind;
+  }
+}
 
 export const useFileOpsHistoryStore = create((set, get) => ({
+  workspace: null,
   undoStack: [],
   redoStack: [],
+  revision: 0, // bumped on every mutation so UI selectors recompute
 
-  /** Push a new op. Clears redo (new branch). */
+  /** Load persisted history when workspace changes. */
+  setWorkspace: (workspace) => {
+    if (get().workspace === workspace) return;
+    const { undoStack, redoStack } = loadFromStorage(workspace);
+    set({ workspace, undoStack, redoStack, revision: get().revision + 1 });
+  },
+
+  /** Push a new op. Clears redo (new branch). Persists. */
   push: (op) => {
+    if (!op || op.kind === 'nop') return;
     set((s) => {
       const next = [...s.undoStack, op];
       const trimmed = next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
-      return { undoStack: trimmed, redoStack: [] };
+      saveToStorage(s.workspace, trimmed, []);
+      return { undoStack: trimmed, redoStack: [], revision: s.revision + 1 };
     });
   },
 
   /**
-   * Undo the most recent op. deps = the same shape as clipboardStore.paste
-   * plus readFile, writeFile, etc. Returns true on success.
+   * Undo the most recent op. `deps` exposes the backend FS operations
+   * the apply layer uses to execute inverses. Returns true on success.
    */
   undo: async (deps) => {
     const s = get();
     if (!s.undoStack.length) return false;
     const op = s.undoStack[s.undoStack.length - 1];
-    const ok = await apply(invertOp(op), deps);
+    const inverse = invertOp(op);
+    if (inverse.kind === 'nop') {
+      // Non-restorable — pop it so user can move past, but warn
+      if (typeof deps.onUnrestorable === 'function') {
+        deps.onUnrestorable(op);
+      } else if (typeof window !== 'undefined' && window.console) {
+        console.warn('[history] cannot undo unrestorable op', op);
+      }
+      set((st) => {
+        const nextUndo = st.undoStack.slice(0, -1);
+        saveToStorage(st.workspace, nextUndo, st.redoStack);
+        return { undoStack: nextUndo, revision: st.revision + 1 };
+      });
+      return false;
+    }
+    const ok = await apply(inverse, deps);
     if (!ok) return false;
-    set((st) => ({
-      undoStack: st.undoStack.slice(0, -1),
-      redoStack: [...st.redoStack, op],
-    }));
+    set((st) => {
+      const nextUndo = st.undoStack.slice(0, -1);
+      const nextRedo = [...st.redoStack, op];
+      saveToStorage(st.workspace, nextUndo, nextRedo);
+      return {
+        undoStack: nextUndo,
+        redoStack: nextRedo,
+        revision: st.revision + 1,
+      };
+    });
     return true;
   },
 
@@ -66,17 +182,36 @@ export const useFileOpsHistoryStore = create((set, get) => ({
     const op = s.redoStack[s.redoStack.length - 1];
     const ok = await apply(op, deps);
     if (!ok) return false;
-    set((st) => ({
-      undoStack: [...st.undoStack, op],
-      redoStack: st.redoStack.slice(0, -1),
-    }));
+    set((st) => {
+      const nextUndo = [...st.undoStack, op];
+      const nextRedo = st.redoStack.slice(0, -1);
+      saveToStorage(st.workspace, nextUndo, nextRedo);
+      return {
+        undoStack: nextUndo,
+        redoStack: nextRedo,
+        revision: st.revision + 1,
+      };
+    });
     return true;
   },
 
   canUndo: () => get().undoStack.length > 0,
   canRedo: () => get().redoStack.length > 0,
 
-  clear: () => set({ undoStack: [], redoStack: [] }),
+  /** Label of the most recent undoable op, e.g. "Undo Create foo.js". */
+  getUndoLabel: () => {
+    const op = get().undoStack[get().undoStack.length - 1];
+    return op ? `Undo ${labelForOp(op)}` : 'Undo';
+  },
+  getRedoLabel: () => {
+    const op = get().redoStack[get().redoStack.length - 1];
+    return op ? `Redo ${labelForOp(op)}` : 'Redo';
+  },
+
+  clear: () => set((s) => {
+    removeFromStorage(s.workspace);
+    return { undoStack: [], redoStack: [], revision: s.revision + 1 };
+  }),
 }));
 
 function invertOp(op) {
@@ -88,7 +223,7 @@ function invertOp(op) {
     case 'delete':
       return op.content != null
         ? { kind: 'create', path: op.path, entity: op.entity, content: op.content }
-        : { kind: 'nop' };
+        : { kind: 'nop', unrestorable: true, reason: `Cannot restore ${op.path}` };
     case 'batch':
       return { kind: 'batch', ops: [...op.ops].reverse().map(invertOp) };
     default:

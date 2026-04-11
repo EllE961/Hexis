@@ -468,17 +468,33 @@ const HexCanvas = forwardRef(function HexCanvas({ files, groups, onCellClick, on
   // Content-hash memoization: skip recompute when the file/group paths
   // + groupings are unchanged. Only structural changes invalidate the
   // layout — git status, modified time, etc. do NOT cause recompute.
+  //
+  // The hash is ORDER-INDEPENDENT (we sort path lists before hashing)
+  // so a re-fetch that returns the same files in a different order
+  // doesn't trigger a pointless rebuild.
+  //
+  // We deliberately DO NOT include layoutRevision in the hash:
+  //   - Normal saves bump revision but leave paths unchanged — we want
+  //     those to skip.
+  //   - Hard-refresh calls `hexCanvasRef.current.hardRefresh()` which
+  //     imperatively clears `layoutHashRef.current = ''`, so the next
+  //     effect run ALWAYS recomputes regardless of the hash.
   const layoutHashRef = useRef('');
-  // Subscribe to the layout-state store's revision so hard-refresh triggers
-  // a recompute. We read .state imperatively below for the hint input.
+  // Still subscribe to revision — on hard-refresh, revision bumps and
+  // re-runs this effect, which then trips the cleared hashRef.
   const layoutRevision = useLayoutStateStore(s => s.revision);
   useEffect(() => {
     if (files.length === 0) return;
-    // Cheap content hash — covers everything that affects layout.
-    // Revision bumps on hard-refresh and on save, so the cache busts.
-    let hash = `${files.length}|${groups.length}|rev${layoutRevision}`;
-    for (const f of files) hash += `|${f.path}:${f.group_path || ''}${f.is_landmark ? '*' : ''}`;
-    for (const g of groups) hash += `|${g.path}:${g.parent_path || ''}`;
+    // Cheap content hash (order-independent)
+    const fileKeys = files
+      .map((f) => `${f.path}:${f.group_path || ''}${f.is_landmark ? '*' : ''}`)
+      .sort();
+    const groupKeys = groups
+      .map((g) => `${g.path}:${g.parent_path || ''}`)
+      .sort();
+    let hash = `${files.length}|${groups.length}`;
+    for (const k of fileKeys) hash += `|${k}`;
+    for (const k of groupKeys) hash += `|${k}`;
     if (hash === layoutHashRef.current && layoutRef.current) {
       // Same inputs — nothing to do. Refresh _fileMap references
       // in case file objects themselves were mutated (git status enrichment).

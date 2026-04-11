@@ -61,17 +61,28 @@
 import { create } from 'zustand';
 
 // ─── Persistence helpers ───
+// Per-workspace storage: `hexis-tasks:<workspace>` so tasks from one
+// project don't leak into another when the user switches workspaces.
 
-const STORAGE_KEY = 'hexis-tasks';
+const STORAGE_PREFIX = 'hexis-tasks:';
+const LEGACY_KEY = 'hexis-tasks'; // pre-namespace — migrated once
 
-function loadTasks() {
+// Module-level so the closures inside store methods don't need to
+// thread the workspace path through every call.
+let currentWorkspace = null;
+
+function storageKey(workspace) {
+  return STORAGE_PREFIX + (workspace || 'default');
+}
+
+function loadTasks(workspace) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey(workspace));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Sanitize on load: orphaned `agent_working` tasks (the server lost its run) → reset to `todo`
-    // so the queue worker can re-attempt them.
+    // Sanitize on load: orphaned `agent_working` tasks (the server lost its
+    // run) → reset to `todo` so the queue worker can re-attempt them.
     return parsed.map(t => {
       if (!t || typeof t !== 'object') return null;
       if (t.status === 'agent_working') {
@@ -87,18 +98,37 @@ function loadTasks() {
 
 function saveTasks(tasks) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+    localStorage.setItem(storageKey(currentWorkspace), JSON.stringify(tasks));
   } catch (err) {
     console.warn('[taskStore] Failed to save tasks to localStorage:', err);
   }
 }
 
+// One-shot migration: move pre-namespace data into the 'default' bucket.
+function migrateLegacy() {
+  try {
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy && !localStorage.getItem(storageKey('default'))) {
+      localStorage.setItem(storageKey('default'), legacy);
+    }
+    if (legacy) localStorage.removeItem(LEGACY_KEY);
+  } catch { /* ignore */ }
+}
+migrateLegacy();
+
 // ─── Store ───
 
 export const useTaskStore = create((set, get) => ({
-  tasks: loadTasks(),
+  tasks: [],
   filter: 'all',      // all | todo | in_progress | agent_working | needs_review | done
   panelOpen: false,
+
+  /** Switch to the task list for a different workspace. Call on open-folder. */
+  setWorkspace: (workspace) => {
+    if (currentWorkspace === workspace) return;
+    currentWorkspace = workspace;
+    set({ tasks: loadTasks(workspace) });
+  },
 
   togglePanel: () => set(s => ({ panelOpen: !s.panelOpen })),
 

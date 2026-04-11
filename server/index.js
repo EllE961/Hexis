@@ -408,8 +408,11 @@ will be pasted directly into the editor in place of the selection.`;
     const stream = query({
       prompt,
       options: {
+        // Note: fallbackModel is intentionally omitted. The SDK throws
+        // "Fallback model cannot be the same as the main model" if both
+        // match, and there's no sensible different fallback for a
+        // single-shot inline edit.
         model: 'claude-sonnet-4-5',
-        fallbackModel: 'claude-sonnet-4-5',
         settingSources: ['user', 'project', 'local'],
         maxTurns: 1,
         allowedTools: [],

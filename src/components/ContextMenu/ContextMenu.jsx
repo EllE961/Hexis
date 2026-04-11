@@ -22,9 +22,10 @@
  *   - If the menu would overflow the viewport, flips to the other side
  */
 
-import { useState, useEffect, useRef, useLayoutEffect, memo } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { W } from '../../theme/window-tokens.js';
+import { Icon } from '../common/Icon.jsx';
 
 const MIN_WIDTH = 220;
 
@@ -206,13 +207,16 @@ function ContextMenuItem({ item, active, onHover, onAction }) {
         display: 'flex',
         alignItems: 'center',
         gap: 10,
-        padding: '5px 10px 5px 24px',
+        padding: '4px 10px 4px 24px',
+        minHeight: W.rowHeight,
         color: disabled
           ? W.textGhost
           : item.destructive
           ? W.red
           : W.text,
-        background: active && !disabled ? W.accentBg : 'transparent',
+        background: active && !disabled
+          ? (item.destructive ? W.redBg : W.accentBg)
+          : 'transparent',
         borderRadius: 3,
         cursor: disabled ? 'default' : 'pointer',
       }}
@@ -226,25 +230,30 @@ function ContextMenuItem({ item, active, onHover, onAction }) {
             top: '50%',
             transform: 'translateY(-50%)',
             color: W.accent,
-            fontSize: 11,
           }}
         >
-          ✓
+          <Icon name="check" size={W.iconSm} />
         </span>
       )}
-      {/* Icon */}
+      {/* Icon — accepts a React element (Codicon) or a string (legacy) */}
       {item.icon && (
         <span
           style={{
-            width: 14,
+            width: W.icon,
+            height: W.icon,
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
             color: disabled ? W.textGhost : item.destructive ? W.red : W.textDim,
-            fontSize: 12,
+            flexShrink: 0,
           }}
         >
-          {item.icon}
+          {React.isValidElement(item.icon)
+            ? React.cloneElement(item.icon, {
+                size: W.icon,
+                color: disabled ? W.textGhost : item.destructive ? W.red : W.textDim,
+              })
+            : item.icon}
         </span>
       )}
       {/* Label */}
@@ -263,7 +272,7 @@ function ContextMenuItem({ item, active, onHover, onAction }) {
         </span>
       )}
       {/* Submenu arrow */}
-      {hasSubmenu && <span style={{ color: W.textDim, fontSize: 10 }}>▸</span>}
+      {hasSubmenu && <Icon name="chevron-right" size={W.iconSm} color={W.textDim} />}
 
       {/* Submenu pane */}
       {submenuOpen && hasSubmenu && (

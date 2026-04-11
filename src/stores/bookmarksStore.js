@@ -1,8 +1,11 @@
 /**
  * Bookmarks Store — cross-file bookmarks with optional notes.
  *
- * Persisted to localStorage per workspace. Keys:
- *   Ctrl+F2      toggle bookmark at cursor
+ * Persisted per-workspace to `localStorage['hexis-bookmarks:<workspace>']`
+ * so bookmarks from Project A don't appear when you open Project B.
+ * Call `setWorkspace(path)` on workspace switch to reload.
+ *
+ *   Ctrl+F2       toggle bookmark at cursor
  *   Ctrl+Shift+F2 next bookmark (wraps)
  *   Ctrl+Alt+F2   previous bookmark
  *
@@ -11,30 +14,59 @@
 
 import { create } from 'zustand';
 
-const STORAGE_KEY = 'hexis-bookmarks';
+const STORAGE_PREFIX = 'hexis-bookmarks:';
+const LEGACY_KEY = 'hexis-bookmarks'; // pre-namespace key — migrated on first load
 
-function load() {
+function storageKey(workspace) {
+  return STORAGE_PREFIX + (workspace || 'default');
+}
+
+function loadFor(workspace) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = localStorage.getItem(storageKey(workspace));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+  } catch { /* fall through */ }
+  return [];
+}
+
+function saveFor(workspace, bookmarks) {
+  try {
+    localStorage.setItem(storageKey(workspace), JSON.stringify(bookmarks));
   } catch {
-    return [];
+    /* storage full — drop silently */
   }
 }
 
-function save(bookmarks) {
+// One-shot migration: move pre-namespace data into the 'default' bucket so
+// existing users don't lose bookmarks on upgrade. Runs once per browser.
+function migrateLegacy() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(bookmarks));
-  } catch {
-    // Storage full or disabled — drop silently
-  }
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy && !localStorage.getItem(storageKey('default'))) {
+      localStorage.setItem(storageKey('default'), legacy);
+    }
+    if (legacy) localStorage.removeItem(LEGACY_KEY);
+  } catch { /* ignore */ }
 }
+migrateLegacy();
 
 export const useBookmarksStore = create((set, get) => ({
-  bookmarks: load(),
+  workspace: null,
+  bookmarks: [],
   currentIndex: -1,
+
+  /** Switch to the bookmarks for a different workspace. */
+  setWorkspace: (workspace) => {
+    if (get().workspace === workspace) return;
+    set({
+      workspace,
+      bookmarks: loadFor(workspace),
+      currentIndex: -1,
+    });
+  },
 
   toggle: ({ path, line, col = 0, label = '' }) => {
     if (!path) return;
@@ -57,7 +89,7 @@ export const useBookmarksStore = create((set, get) => ({
           },
         ];
       }
-      save(next);
+      saveFor(s.workspace, next);
       return { bookmarks: next };
     });
   },
@@ -65,7 +97,7 @@ export const useBookmarksStore = create((set, get) => ({
   setNote: (id, note) => {
     set((s) => {
       const next = s.bookmarks.map((b) => (b.id === id ? { ...b, note } : b));
-      save(next);
+      saveFor(s.workspace, next);
       return { bookmarks: next };
     });
   },
@@ -73,13 +105,14 @@ export const useBookmarksStore = create((set, get) => ({
   remove: (id) => {
     set((s) => {
       const next = s.bookmarks.filter((b) => b.id !== id);
-      save(next);
+      saveFor(s.workspace, next);
       return { bookmarks: next };
     });
   },
 
   clear: () => {
-    save([]);
+    const s = get();
+    saveFor(s.workspace, []);
     set({ bookmarks: [], currentIndex: -1 });
   },
 

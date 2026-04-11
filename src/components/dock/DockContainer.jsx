@@ -13,10 +13,11 @@
  * so left/right reach the full height and no visual overlap occurs.
  */
 
-import { cloneElement } from 'react';
+import React, { cloneElement } from 'react';
 import { usePanelStore } from '../../stores/panelStore.js';
 import { W } from '../../theme/window-tokens.js';
 import { HeaderButton } from '../window/Window.jsx';
+import { Icon } from '../common/Icon.jsx';
 
 // Width/height of the narrow edge-collapsed strip
 const EDGE_STRIP_SIZE = 32;
@@ -227,9 +228,7 @@ function DropPreview({ style, side, willTab, count }) {
         fontSize: W.fontMd,
         fontWeight: W.fontWeightSemi,
       }}>
-        <span style={{ fontSize: W.iconLg, color: W.accent }}>
-          {willTab ? '⊕' : '⟰'}
-        </span>
+        <Icon name={willTab ? 'add' : 'layout'} size={W.iconMd} color={W.accent} />
         <span>
           {willTab
             ? `Add as tab (${count + 1} total)`
@@ -303,13 +302,29 @@ function EdgeRail({ side, panels, style }) {
               e.currentTarget.style.borderColor = W.border;
             }}
           >
-            {icon && <span style={{ fontSize: W.iconLg }}>{icon}</span>}
+            {icon && (
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: W.iconMd,
+                height: W.iconMd,
+              }}>
+                {typeof icon === 'string'
+                  ? icon
+                  : React.isValidElement(icon)
+                    ? React.cloneElement(icon, { size: W.iconMd })
+                    : icon}
+              </span>
+            )}
             {/* For horizontal rail (bottom), also show title next to icon */}
             {isHorizontal && <span>{title}</span>}
-            {/* Expand arrow */}
-            <span style={{ fontSize: W.fontSm, opacity: 0.7 }}>
-              {side === 'left' ? '▶' : side === 'right' ? '◀' : '▲'}
-            </span>
+            {/* Expand arrow pointing INTO the viewport */}
+            <Icon
+              name={side === 'left' ? 'chevron-right' : side === 'right' ? 'chevron-left' : 'chevron-up'}
+              size={W.iconSm}
+              style={{ opacity: 0.7 }}
+            />
           </button>
         );
       })}
@@ -394,7 +409,7 @@ function TabBar({ zone, panels, activeId, setActiveTab }) {
   const setDockPreview = usePanelStore(s => s.setDockPreview);
 
   // Collapse icon points toward the dock edge for this zone
-  const collapseIcon = zone === 'left' ? '◀' : zone === 'right' ? '▶' : '▼';
+  const collapseCodicon = zone === 'left' ? 'chevron-left' : zone === 'right' ? 'chevron-right' : 'chevron-down';
 
   const startTabDrag = (panelId, e) => {
     if (e.target.closest('button[data-tab-control]')) return;
@@ -495,7 +510,22 @@ function TabBar({ zone, panels, activeId, setActiveTab }) {
               onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = W.bg3; }}
               onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
             >
-              {icon && <span style={{ fontSize: W.iconSize, color: isActive ? W.accent : W.textDim }}>{icon}</span>}
+              {icon && (
+                <span style={{
+                  color: isActive ? W.accent : W.textDim,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: W.icon,
+                  height: W.icon,
+                }}>
+                  {typeof icon === 'string'
+                    ? icon
+                    : React.isValidElement(icon)
+                      ? React.cloneElement(icon, { size: W.icon, color: isActive ? W.accent : W.textDim })
+                      : icon}
+                </span>
+              )}
               <span>{title}</span>
               {/* Per-tab close button */}
               <button
@@ -504,12 +534,11 @@ function TabBar({ zone, panels, activeId, setActiveTab }) {
                 onClick={(e) => { e.stopPropagation(); hidePanel(p.id); }}
                 style={{
                   marginLeft: W.s1,
-                  width: 16,
-                  height: 16,
+                  width: 18,
+                  height: 18,
                   border: 'none',
                   background: 'transparent',
                   color: W.textMuted,
-                  fontSize: W.fontMd,
                   cursor: 'pointer',
                   borderRadius: W.radius1,
                   display: 'inline-flex',
@@ -517,9 +546,11 @@ function TabBar({ zone, panels, activeId, setActiveTab }) {
                   justifyContent: 'center',
                   padding: 0,
                 }}
-                onMouseEnter={e => { e.currentTarget.style.background = W.bg3; e.currentTarget.style.color = W.red; }}
+                onMouseEnter={e => { e.currentTarget.style.background = W.redBg; e.currentTarget.style.color = W.red; }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = W.textMuted; }}
-              >✕</button>
+              >
+                <Icon name="close" size={W.iconSm} />
+              </button>
               {/* Active indicator line */}
               {isActive && (
                 <span style={{
@@ -538,14 +569,14 @@ function TabBar({ zone, panels, activeId, setActiveTab }) {
 
       {/* Active-tab window controls (right side) */}
       {activePanel && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2, padding: `0 ${W.s2}px`, borderLeft: `1px solid ${W.border}`, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 0, padding: `0 ${W.s1}px`, borderLeft: `1px solid ${W.border}`, flexShrink: 0 }}>
           <HeaderButton
-            icon={collapseIcon}
+            icon={<Icon name={collapseCodicon} size={W.iconSm} />}
             label="Collapse active tab to edge"
             onClick={() => toggleEdgeCollapse(activePanel.id)}
           />
           <HeaderButton
-            icon="⛶"
+            icon={<Icon name="chrome-maximize" size={W.iconSm} />}
             label="Maximize"
             onClick={() => toggleMaximize(activePanel.id)}
           />

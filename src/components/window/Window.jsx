@@ -12,8 +12,9 @@
  * All windows share the same header style, padding, border, and animation.
  */
 
-import { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { W } from '../../theme/window-tokens.js';
+import { Icon } from '../common/Icon.jsx';
 
 /* ─── Window Header ─── */
 
@@ -37,14 +38,23 @@ export function WindowHeader({ icon, title, subtitle, controls, onMouseDown, dra
     >
       {icon && (
         <span style={{
-          fontSize: W.iconLg,
-          display: 'flex',
+          display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: W.iconLg,
+          width: W.iconMd,
+          height: W.iconMd,
           flexShrink: 0,
           color: focused ? W.accent : W.textDim,
-        }}>{icon}</span>
+        }}>
+          {typeof icon === 'string'
+            ? icon
+            : React.isValidElement(icon)
+              ? React.cloneElement(icon, {
+                  size: W.iconMd,
+                  color: focused ? W.accent : W.textDim,
+                })
+              : icon}
+        </span>
       )}
       <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: W.s2 }}>
         <span style={{
@@ -77,7 +87,7 @@ export function WindowHeader({ icon, title, subtitle, controls, onMouseDown, dra
 
 /* ─── Header control button (X, minimize, maximize, etc.) ─── */
 
-export function HeaderButton({ icon, label, onClick, color = W.textDim, hoverColor = W.text }) {
+export function HeaderButton({ icon, label, onClick, color = W.textDim, hoverColor = W.text, hoverBg = W.bg3 }) {
   return (
     <button
       onClick={(e) => { e.stopPropagation(); onClick?.(); }}
@@ -86,18 +96,17 @@ export function HeaderButton({ icon, label, onClick, color = W.textDim, hoverCol
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        width: 24,
-        height: 24,
+        width: W.dockBtnSize,
+        height: W.dockBtnSize,
         border: 'none',
         background: 'transparent',
         color,
-        fontSize: W.fontMd,
         borderRadius: W.radius1,
         cursor: 'pointer',
-        transition: `all ${W.animFast}`,
+        padding: 0,
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.background = W.bg3;
+        e.currentTarget.style.background = hoverBg;
         e.currentTarget.style.color = hoverColor;
       }}
       onMouseLeave={(e) => {
@@ -230,7 +239,7 @@ export function Modal({
             title={title}
             subtitle={subtitle}
             controls={closable && (
-              <HeaderButton icon="✕" label="Close" onClick={onClose} />
+              <HeaderButton icon={<Icon name="close" size={W.iconSm} />} label="Close" onClick={onClose} hoverColor={W.red} hoverBg={W.redBg} />
             )}
           />
         )}

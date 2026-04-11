@@ -16,6 +16,7 @@ import { useAgentStore, AGENT_ROLES } from '../../stores/agentStore.js';
 import { useEditorStore } from '../../stores/editorStore.js';
 import { usePanelStore } from '../../stores/panelStore.js';
 import { Modal } from '../window/Window.jsx';
+import { Icon } from '../common/Icon.jsx';
 import { W } from '../../theme/window-tokens.js';
 
 /* ─── Design Tokens — proxy onto the active W theme ─── */
@@ -1239,7 +1240,7 @@ function DependencyPicker({ task, allTasks, onSave, onClose }) {
       open={true}
       onClose={onClose}
       title="Set dependencies"
-      icon="⛓"
+      icon={<Icon name="link" />}
       subtitle={`"${task.title}" waits for these`}
       width={520}
       footer={footer}
@@ -1316,7 +1317,7 @@ function ResumeDialog({ task, onResume, onClose }) {
       open={true}
       onClose={onClose}
       title={`Resume "${task.title}"`}
-      icon="▶"
+      icon={<Icon name="debug-start" />}
       width={520}
       footer={footer}
     >

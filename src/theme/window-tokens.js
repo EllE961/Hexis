@@ -49,14 +49,28 @@ function buildTheme(overrides) {
     s6: 24,
     s8: 32,
 
-    // ─── Sizing ───
+    // ─── Sizing — VS Code compact density ───
     headerHeight: 36,
-    tabHeight: 32,
-    rowHeight: 28,
-    buttonHeight: 28,
-    iconSize: 14,
-    iconLg: 18,
+    tabHeight: 30,          // was 32 — matches VS Code's tab strip
+    rowHeight: 22,          // was 28 — tree + context menu
+    buttonHeight: 22,
     hitTarget: 32,
+
+    // Dock / menu chrome (compact)
+    dockHeaderHeight: 28,   // was 32 — VS Code panel headers
+    dockBtnSize: 22,        // was 28 — header control buttons
+    menuBarHeight: 28,      // was 32
+
+    // ─── Icon sizes — compact IDE scale, baseline 14px ───
+    icon:    14,            // default — menu items, tree rows, tab close
+    iconSm:  12,            // tiny — dock header controls, inline hints
+    iconMd:  16,            // primary buttons, file icons, dock brand
+    iconLg:  20,            // modal headers, empty-state primary
+    iconXl:  28,            // welcome / onboarding
+
+    // Legacy aliases (do not remove — imported in several places)
+    iconSize: 14,
+    // iconLg already defined above
 
     // ─── Border radius ───
     radius0: 0,

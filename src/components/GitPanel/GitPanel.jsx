@@ -6,6 +6,7 @@
 
 import { useState, useEffect } from 'react';
 import { useGitStore } from '../../stores/gitStore.js';
+import { Icon } from '../common/Icon.jsx';
 import { W } from '../../theme/window-tokens.js';
 
 export default function GitPanel() {
@@ -74,11 +75,22 @@ export default function GitPanel() {
           style={{ background: W.accentBg, color: W.accent, border: `1px solid ${W.accentSoft}` }}
           onClick={() => setShowBranches(!showBranches)}
         >
-          <span>⎇ {currentBranch}</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Icon name="git-branch" size={W.icon} color="inherit" />
+            {currentBranch}
+          </span>
           <div className="flex items-center gap-2 text-[10px]">
-            {ahead > 0 && <span style={{ color: W.green }}>↑{ahead}</span>}
-            {behind > 0 && <span style={{ color: W.blue }}>↓{behind}</span>}
-            <span>{showBranches ? '▲' : '▼'}</span>
+            {ahead > 0 && (
+              <span style={{ color: W.green, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                <Icon name="arrow-up" size={W.iconSm} color="inherit" />{ahead}
+              </span>
+            )}
+            {behind > 0 && (
+              <span style={{ color: W.blue, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                <Icon name="arrow-down" size={W.iconSm} color="inherit" />{behind}
+              </span>
+            )}
+            <Icon name={showBranches ? 'chevron-up' : 'chevron-down'} size={W.iconSm} color="inherit" />
           </div>
         </button>
 
@@ -87,15 +99,17 @@ export default function GitPanel() {
             {branches.map(b => (
               <div key={b.name} className="flex items-center justify-between px-3 py-1.5 text-[12px] group"
                 style={{ color: b.current ? W.accent : W.textDim, background: b.current ? W.accentBg : 'transparent' }}>
-                <button className="flex-1 text-left truncate" onClick={() => { checkoutBranch(b.name); setShowBranches(false); }}>
-                  {b.name} {b.current && '●'}
+                <button className="flex-1 text-left truncate" onClick={() => { checkoutBranch(b.name); setShowBranches(false); }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {b.current && <Icon name="circle-filled" size={8} color={W.accent} />}
+                  {b.name}
                 </button>
                 {!b.current && deleteBranch && (
                   <button
-                    className="opacity-0 group-hover:opacity-100 text-[10px] px-1 rounded"
-                    style={{ color: W.red }}
+                    className="opacity-0 group-hover:opacity-100 px-1 rounded"
+                    style={{ color: W.red, display: 'inline-flex', alignItems: 'center' }}
                     onClick={(e) => { e.stopPropagation(); doAction(() => deleteBranch(b.name), `Deleted ${b.name}`); }}
-                  >✕</button>
+                  ><Icon name="trash" size={W.iconSm} color="inherit" /></button>
                 )}
               </div>
             ))}
@@ -250,15 +264,15 @@ export default function GitPanel() {
 
             {/* Push / Pull */}
             <div className="px-4 py-3 flex gap-2" style={{ borderTop: '1px solid rgba(139, 148, 158, 0.08)' }}>
-              <button className="flex-1 py-2 rounded-lg text-[12px] font-medium"
+              <button className="flex-1 py-2 rounded-lg text-[12px] font-medium flex items-center justify-center gap-1"
                 style={{ background: W.bg3, color: W.textDim }}
                 onClick={() => doAction(push, 'Pushed!')}>
-                Push {ahead > 0 && `↑${ahead}`}
+                <Icon name="arrow-up" size={W.iconSm} color="inherit" /> Push {ahead > 0 && `(${ahead})`}
               </button>
-              <button className="flex-1 py-2 rounded-lg text-[12px] font-medium"
+              <button className="flex-1 py-2 rounded-lg text-[12px] font-medium flex items-center justify-center gap-1"
                 style={{ background: W.bg3, color: W.textDim }}
                 onClick={() => doAction(pull, 'Pulled!')}>
-                Pull {behind > 0 && `↓${behind}`}
+                <Icon name="arrow-down" size={W.iconSm} color="inherit" /> Pull {behind > 0 && `(${behind})`}
               </button>
             </div>
 

@@ -14,6 +14,28 @@ export const useEditorStore = create((set, get) => ({
   recentFiles: [],  // last 10 opened file paths
 
   // Open a file in the editor
+  /**
+   * Read a file's content WITHOUT opening it as a tab. Used by undo
+   * history capture (reads the file right before deletion so we can
+   * restore it on Ctrl+Z). Returns `null` on any failure — callers
+   * should treat that as "unrestorable" and skip adding content to
+   * the history op.
+   */
+  readFileContent: async (filePath) => {
+    try {
+      if (IS_TAURI) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        return await invoke('read_file', { path: filePath });
+      }
+      const res = await fetch(`/api/file?path=${encodeURIComponent(filePath)}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.content ?? null;
+    } catch {
+      return null;
+    }
+  },
+
   openFile: async (filePath) => {
     const existing = get().tabs.find(t => t.path === filePath);
     if (existing) {

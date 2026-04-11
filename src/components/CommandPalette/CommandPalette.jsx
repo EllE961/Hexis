@@ -7,23 +7,27 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useGitStore } from '../../stores/gitStore.js';
 import { useSymbolIndexStore } from '../../stores/symbolIndexStore.js';
 import { SYMBOL_STYLE } from '../editor/symbols.js';
+import { Icon } from '../common/Icon.jsx';
 import { W } from '../../theme/window-tokens.js';
 
 // ─── Built-in commands ───
+//
+// `icon` is the Codicon name — rendered via the shared <Icon/> component.
+// Category-specific icons make scanning the palette much faster.
 
 const COMMANDS = [
-  { id: 'git:commit',        title: 'Git: Commit',            icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'git:push',          title: 'Git: Push',              icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'git:pull',          title: 'Git: Pull',              icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'git:ship-it',       title: 'Git: Ship It',           icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'git:stash',         title: 'Git: Stash',             icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'git:create-branch', title: 'Git: Create Branch',     icon: '\u26A1', shortcut: null,    category: 'git' },
-  { id: 'ai:new-task',       title: 'AI: New Task',           icon: '\u26A1', shortcut: null,    category: 'ai' },
-  { id: 'view:git-panel',    title: 'View: Toggle Git Panel', icon: '\u26A1', shortcut: 'Ctrl+G', category: 'view' },
-  { id: 'view:ai-panel',     title: 'View: Toggle AI Panel',  icon: '\u26A1', shortcut: 'Ctrl+I', category: 'view' },
-  { id: 'view:timeline',     title: 'View: Toggle Timeline',  icon: '\u26A1', shortcut: 'Ctrl+T', category: 'view' },
-  { id: 'file:save',         title: 'File: Save',             icon: '\u26A1', shortcut: 'Ctrl+S', category: 'file' },
-  { id: 'file:close-tab',    title: 'File: Close Tab',        icon: '\u26A1', shortcut: null,    category: 'file' },
+  { id: 'git:commit',        title: 'Git: Commit',            icon: 'git-commit',    shortcut: null,    category: 'git' },
+  { id: 'git:push',          title: 'Git: Push',              icon: 'repo-push',     shortcut: null,    category: 'git' },
+  { id: 'git:pull',          title: 'Git: Pull',              icon: 'repo-pull',     shortcut: null,    category: 'git' },
+  { id: 'git:ship-it',       title: 'Git: Ship It',           icon: 'rocket',        shortcut: null,    category: 'git' },
+  { id: 'git:stash',         title: 'Git: Stash',             icon: 'archive',       shortcut: null,    category: 'git' },
+  { id: 'git:create-branch', title: 'Git: Create Branch',     icon: 'git-branch',    shortcut: null,    category: 'git' },
+  { id: 'ai:new-task',       title: 'AI: New Task',           icon: 'sparkle',       shortcut: null,    category: 'ai' },
+  { id: 'view:git-panel',    title: 'View: Toggle Git Panel', icon: 'source-control', shortcut: 'Ctrl+G', category: 'view' },
+  { id: 'view:ai-panel',     title: 'View: Toggle AI Panel',  icon: 'hubot',         shortcut: 'Ctrl+I', category: 'view' },
+  { id: 'view:timeline',     title: 'View: Toggle Timeline',  icon: 'history',       shortcut: 'Ctrl+T', category: 'view' },
+  { id: 'file:save',         title: 'File: Save',             icon: 'save',          shortcut: 'Ctrl+S', category: 'file' },
+  { id: 'file:close-tab',    title: 'File: Close Tab',        icon: 'close',         shortcut: null,    category: 'file' },
 ];
 
 const MAX_RESULTS = 12;
@@ -349,9 +353,7 @@ export default function CommandPalette({ open, onClose, files = [], onOpenFile, 
             gap: 10,
           }}
         >
-          <span style={{ color: W.textGhost, fontSize: 14, flexShrink: 0 }}>
-            {'\u26A1'}
-          </span>
+          <Icon name="search" size={W.iconMd} color={W.textGhost} />
           <input
             ref={inputRef}
             type="text"
@@ -430,9 +432,19 @@ export default function CommandPalette({ open, onClose, files = [], onOpenFile, 
                   transition: 'background 0.1s, border-color 0.1s',
                 }}
               >
-                {/* Icon */}
-                <span style={{ fontSize: 14, width: 20, textAlign: 'center', flexShrink: 0, opacity: 0.8 }}>
-                  {item.icon}
+                {/* Icon — Codicon name (string) or a symbol SVG (file results) */}
+                <span style={{
+                  width: W.iconMd,
+                  height: W.iconMd,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                  color: isSelected ? W.accent : W.textDim,
+                }}>
+                  {typeof item.icon === 'string' && item.icon.length > 2
+                    ? <Icon name={item.icon} size={W.icon} color="inherit" />
+                    : item.icon}
                 </span>
 
                 {/* Title + subtitle */}

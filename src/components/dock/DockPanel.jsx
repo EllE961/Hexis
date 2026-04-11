@@ -5,19 +5,20 @@
  * visible resize handles, proper window controls.
  */
 
-import { useRef } from 'react';
+import React, { useRef } from 'react';
 import { usePanelStore } from '../../stores/panelStore.js';
 import { W } from '../../theme/window-tokens.js';
 import { HeaderButton } from '../window/Window.jsx';
+import { Icon } from '../common/Icon.jsx';
 
 const DOCK_SNAP = 60; // bigger snap zone
 
-/** Returns an arrow icon pointing toward the dock edge (for the collapse button). */
-function collapseIconForDock(dock) {
-  if (dock === 'left') return '◀';
-  if (dock === 'right') return '▶';
-  if (dock === 'bottom') return '▼';
-  return '◀';
+/** Codicon name pointing toward the dock edge (for the collapse button). */
+function collapseCodiconForDock(dock) {
+  if (dock === 'left') return 'chevron-left';
+  if (dock === 'right') return 'chevron-right';
+  if (dock === 'bottom') return 'chevron-down';
+  return 'chevron-left';
 }
 
 export default function DockPanel({ id, title, icon, children, hideHeader = false }) {
@@ -166,11 +167,11 @@ export default function DockPanel({ id, title, icon, children, hideHeader = fals
       <div
         style={{
           flexShrink: 0,
-          height: W.headerHeight,
+          height: W.dockHeaderHeight,
           display: 'flex',
           alignItems: 'center',
           gap: W.s2,
-          padding: `0 ${W.s2}px 0 ${W.s3}px`,
+          padding: `0 ${W.s1}px 0 ${W.s2}px`,
           background: W.bg2,
           borderBottom: `1px solid ${focused ? W.borderHi : W.border}`,
           cursor: maximized ? 'default' : 'grab',
@@ -183,57 +184,71 @@ export default function DockPanel({ id, title, icon, children, hideHeader = fals
         {/* Drag grip dots */}
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 2,
-          opacity: 0.45, flexShrink: 0,
+          opacity: 0.4, flexShrink: 0,
         }}>
-          <div style={{ width: 12, height: 2, borderRadius: 1, background: W.textDim }} />
-          <div style={{ width: 12, height: 2, borderRadius: 1, background: W.textDim }} />
-          <div style={{ width: 12, height: 2, borderRadius: 1, background: W.textDim }} />
+          <div style={{ width: 10, height: 1.5, borderRadius: 1, background: W.textDim }} />
+          <div style={{ width: 10, height: 1.5, borderRadius: 1, background: W.textDim }} />
+          <div style={{ width: 10, height: 1.5, borderRadius: 1, background: W.textDim }} />
         </div>
 
-        {/* Icon */}
+        {/* Icon — accepts either a string (legacy) or a React element. Elements
+            get cloned with the correct size/color for the header context. */}
         {icon && (
           <span style={{
-            fontSize: W.iconLg,
             color: focused ? W.accent : W.textDim,
             flexShrink: 0,
-            display: 'flex',
+            display: 'inline-flex',
             alignItems: 'center',
-          }}>{icon}</span>
+            justifyContent: 'center',
+            width: W.iconMd,
+            height: W.iconMd,
+          }}>
+            {typeof icon === 'string'
+              ? icon
+              : React.isValidElement(icon)
+                ? React.cloneElement(icon, {
+                    size: W.iconMd,
+                    color: focused ? W.accent : W.textDim,
+                  })
+                : icon}
+          </span>
         )}
 
-        {/* Title */}
+        {/* Title — uppercase compact IDE style */}
         <span style={{
           flex: 1,
           minWidth: 0,
-          fontSize: W.fontLg,
+          fontSize: W.fontSm,
           fontWeight: W.fontWeightSemi,
           color: W.text,
-          letterSpacing: '-0.01em',
+          letterSpacing: '0.05em',
+          textTransform: 'uppercase',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
         }}>{title}</span>
 
         {/* Window controls — collapse-to-edge + maximize + close */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
           {isDocked && !maximized && (
             <HeaderButton
-              icon={collapseIconForDock(panel.dock)}
+              icon={<Icon name={collapseCodiconForDock(panel.dock)} size={W.iconSm} />}
               label="Collapse to edge"
               onClick={() => toggleEdgeCollapse(id)}
             />
           )}
           <HeaderButton
-            icon={maximized ? '❐' : '⛶'}
+            icon={<Icon name={maximized ? 'chrome-restore' : 'chrome-maximize'} size={W.iconSm} />}
             label={maximized ? 'Restore' : 'Maximize'}
             onClick={() => toggleMaximize(id)}
           />
           <HeaderButton
-            icon="✕"
+            icon={<Icon name="close" size={W.iconSm} />}
             label="Close"
             onClick={() => hidePanel(id)}
             color={W.textDim}
             hoverColor={W.red}
+            hoverBg={W.redBg}
           />
         </div>
       </div>
@@ -284,9 +299,9 @@ export default function DockPanel({ id, title, icon, children, hideHeader = fals
             <>
               <div className="absolute bottom-0 right-0 cursor-nwse-resize" style={{ width: 16, height: 16, zIndex: 6 }}
                 onMouseDown={(e) => startResize('bottom-right', e)}>
-                <svg width="10" height="10" viewBox="0 0 10 10" className="absolute bottom-1 right-1 opacity-30">
-                  <line x1="9" y1="1" x2="1" y2="9" stroke="#8B949E" strokeWidth="1.5" />
-                  <line x1="9" y1="5" x2="5" y2="9" stroke="#8B949E" strokeWidth="1.5" />
+                <svg width="10" height="10" viewBox="0 0 10 10" className="absolute bottom-1 right-1 opacity-40">
+                  <line x1="9" y1="1" x2="1" y2="9" stroke={W.textGhost} strokeWidth="1.5" />
+                  <line x1="9" y1="5" x2="5" y2="9" stroke={W.textGhost} strokeWidth="1.5" />
                 </svg>
               </div>
               <div className="absolute top-0 right-0 cursor-nesw-resize" style={{ width: 16, height: 16, zIndex: 6 }}

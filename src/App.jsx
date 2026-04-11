@@ -31,6 +31,9 @@ import NameInputModal from './components/modals/NameInputModal.jsx';
 import ConfirmModal from './components/modals/ConfirmModal.jsx';
 import { useClipboardStore } from './stores/clipboardStore.js';
 import { useFileOpsHistoryStore, MAX_CONTENT_BYTES as HISTORY_MAX_CONTENT_BYTES } from './stores/fileOpsHistoryStore.js';
+import { useBookmarksStore } from './stores/bookmarksStore.js';
+import { useLocalHistoryStore } from './stores/localHistoryStore.js';
+import { useTaskStore } from './stores/taskStore.js';
 import { useSelectionStore } from './stores/selectionStore.js';
 import { useLayoutStateStore } from './stores/layoutStateStore.js';
 import { Icon } from './components/common/Icon.jsx';
@@ -637,6 +640,14 @@ export default function App() {
   // undo/redo stacks are per-workspace and survive reloads.
   useEffect(() => {
     useFileOpsHistoryStore.getState().setWorkspace(workspace || null);
+  }, [workspace]);
+
+  // Sync the per-project stores so bookmarks / snapshots / tasks don't
+  // leak across open-folder switches.
+  useEffect(() => {
+    useBookmarksStore.getState().setWorkspace(workspace || null);
+    useLocalHistoryStore.getState().setWorkspace(workspace || null);
+    useTaskStore.getState().setWorkspace(workspace || null);
   }, [workspace]);
 
   // Load project. Re-runs whenever the workspace changes (Tauri folder
@@ -1593,6 +1604,15 @@ export default function App() {
         e.preventDefault();
         usePanelStore.getState().showPanel('editor');
         window.dispatchEvent(new Event('hexis:toggle-explorer'));
+      }
+      // Ctrl+O: open folder (native picker) — only when the editor isn't focused
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'o' || e.key === 'O')) {
+        const editorFocused = document.activeElement?.closest?.('.cm-editor');
+        const inputFocused = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+        if (!editorFocused && !inputFocused) {
+          e.preventDefault();
+          handleMenuAction('file:openFolder');
+        }
       }
     };
     window.addEventListener('keydown', handler);

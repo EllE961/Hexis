@@ -10,6 +10,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useChatStore } from '../../stores/chatStore.js';
+import { Icon } from '../common/Icon.jsx';
 import { W } from '../../theme/window-tokens.js';
 
 export default function ChatPanel() {
@@ -108,16 +109,23 @@ export default function ChatPanel() {
               title="New chat"
               style={{
                 flex: 1,
-                padding: `${W.s1}px ${W.s2}px`,
+                padding: `${W.s2}px ${W.s3}px`,
                 background: W.accentBg,
-                border: `1px solid ${W.accentSoft}`,
+                border: `1px solid ${W.borderHi}`,
                 borderRadius: W.radius1,
                 color: W.accent,
                 fontSize: W.fontMd,
                 fontWeight: W.fontWeightSemi,
                 cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
               }}
-            >+ New chat</button>
+            >
+              <Icon name="add" size={W.iconSm} color="inherit" />
+              New chat
+            </button>
           </div>
           <div style={{ flex: 1, overflowY: 'auto' }}>
             {sortedChats.map(c => (
@@ -172,19 +180,23 @@ export default function ChatPanel() {
                   onClick={(e) => { e.stopPropagation(); deleteChat(c.id); }}
                   title="Delete"
                   style={{
-                    width: 18,
-                    height: 18,
+                    width: 20,
+                    height: 20,
                     border: 'none',
                     background: 'transparent',
                     color: W.textMuted,
                     cursor: 'pointer',
                     borderRadius: W.radius1,
-                    fontSize: W.fontSm,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
                     opacity: 0.7,
                   }}
-                  onMouseEnter={e => { e.currentTarget.style.color = W.red; e.currentTarget.style.opacity = 1; }}
-                  onMouseLeave={e => { e.currentTarget.style.color = W.textMuted; e.currentTarget.style.opacity = 0.7; }}
-                >✕</button>
+                  onMouseEnter={e => { e.currentTarget.style.color = W.red; e.currentTarget.style.background = W.redBg; e.currentTarget.style.opacity = 1; }}
+                  onMouseLeave={e => { e.currentTarget.style.color = W.textMuted; e.currentTarget.style.background = 'transparent'; e.currentTarget.style.opacity = 0.7; }}
+                >
+                  <Icon name="close" size={W.iconSm} color="inherit" />
+                </button>
               </div>
             ))}
           </div>
@@ -212,17 +224,42 @@ export default function ChatPanel() {
             onClick={() => setSidebarOpen(!sidebarOpen)}
             title="Toggle chat list"
             style={{
-              width: 24,
-              height: 24,
+              width: 26,
+              height: 26,
               border: `1px solid ${W.border}`,
               background: sidebarOpen ? W.bg3 : W.bg1,
+              color: sidebarOpen ? W.accent : W.textDim,
+              borderRadius: W.radius1,
+              cursor: 'pointer',
+              flexShrink: 0,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Icon name="list-unordered" size={W.iconSm} color="inherit" />
+          </button>
+          <button
+            onClick={() => createChat()}
+            title="New chat"
+            style={{
+              width: 26,
+              height: 26,
+              border: `1px solid ${W.border}`,
+              background: W.bg1,
               color: W.textDim,
               borderRadius: W.radius1,
               cursor: 'pointer',
-              fontSize: W.fontMd,
               flexShrink: 0,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
-          >☰</button>
+            onMouseEnter={e => { e.currentTarget.style.color = W.accent; e.currentTarget.style.borderColor = W.borderHi; }}
+            onMouseLeave={e => { e.currentTarget.style.color = W.textDim; e.currentTarget.style.borderColor = W.border; }}
+          >
+            <Icon name="add" size={W.iconSm} color="inherit" />
+          </button>
           <div style={{
             flex: 1,
             minWidth: 0,
@@ -256,15 +293,23 @@ export default function ChatPanel() {
             onClick={() => clearMessages(activeId)}
             title="Clear messages (new session)"
             style={{
-              padding: `${W.s1}px ${W.s2}px`,
+              width: 26,
+              height: 26,
               background: W.bg1,
               border: `1px solid ${W.border}`,
               color: W.textDim,
-              fontSize: W.fontSm,
               borderRadius: W.radius1,
               cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
             }}
-          >Clear</button>
+            onMouseEnter={e => { e.currentTarget.style.color = W.red; e.currentTarget.style.borderColor = W.red; }}
+            onMouseLeave={e => { e.currentTarget.style.color = W.textDim; e.currentTarget.style.borderColor = W.border; }}
+          >
+            <Icon name="clear-all" size={W.iconSm} color="inherit" />
+          </button>
         </div>
 
         {/* Messages */}
@@ -352,7 +397,7 @@ export default function ChatPanel() {
               <button
                 type="button"
                 onClick={cancelSend}
-                title="Stop"
+                title="Stop (cancel this turn)"
                 style={{
                   padding: `${W.s2}px ${W.s3}px`,
                   background: W.redBg,
@@ -362,8 +407,15 @@ export default function ChatPanel() {
                   fontSize: W.fontMd,
                   fontWeight: W.fontWeightSemi,
                   cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  alignSelf: 'flex-end',
                 }}
-              >Stop</button>
+              >
+                <Icon name="debug-stop" size={W.iconSm} color="inherit" />
+                Stop
+              </button>
             ) : (
               <button
                 type="submit"
@@ -371,15 +423,22 @@ export default function ChatPanel() {
                 title="Send (Enter)"
                 style={{
                   padding: `${W.s2}px ${W.s3}px`,
-                  background: input.trim() ? W.accent : W.accentSoft,
-                  border: 'none',
+                  background: input.trim() ? W.accent : 'transparent',
+                  border: `1px solid ${input.trim() ? W.accent : W.border}`,
                   borderRadius: W.radius1,
-                  color: input.trim() ? W.bg0 : W.textMuted,
+                  color: input.trim() ? W.bg0 : W.textDim,
                   fontSize: W.fontMd,
                   fontWeight: W.fontWeightBold,
                   cursor: input.trim() ? 'pointer' : 'default',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  alignSelf: 'flex-end',
                 }}
-              >Send</button>
+              >
+                <Icon name="send" size={W.iconSm} color="inherit" />
+                Send
+              </button>
             )}
           </div>
         </form>
@@ -443,22 +502,33 @@ function Message({ role, content, tokens, cost, streaming }) {
 function EmptyState() {
   return (
     <div style={{
-      marginTop: '20%',
+      marginTop: '15%',
       textAlign: 'center',
       color: W.textMuted,
       fontSize: W.fontLg,
       padding: W.s4,
     }}>
-      <div style={{ fontSize: 36, marginBottom: W.s3 }}>💬</div>
-      <div style={{ fontWeight: W.fontWeightSemi, color: W.textDim, marginBottom: W.s2 }}>
+      <div style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 56,
+        height: 56,
+        borderRadius: W.radius3,
+        background: W.accentBg,
+        border: `1px solid ${W.borderHi}`,
+        color: W.accent,
+        marginBottom: W.s3,
+      }}>
+        <Icon name="comment-discussion" size={W.iconXl} color="inherit" />
+      </div>
+      <div style={{ fontWeight: W.fontWeightSemi, color: W.text, marginBottom: W.s2, fontSize: W.fontXl }}>
         Chat with Hexis
       </div>
       <div style={{ fontSize: W.fontMd, lineHeight: 1.5, maxWidth: 420, margin: '0 auto' }}>
         Direct conversational agent with full tool access — memory, skills,
-        file edits, tests, git. Same Claude you'd get in the CLI, but wired
-        into your repo with zero setup. Use for quick fixes, questions, and
-        iteration. For deep research or full multi-agent review, use the
-        AI Agents panel instead.
+        file edits, tests, git. Same Claude you'd get in the CLI, wired into
+        your repo. Type a message below and press <strong style={{ color: W.textDim }}>Enter</strong> to send.
       </div>
     </div>
   );

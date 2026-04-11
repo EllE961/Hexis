@@ -79,11 +79,55 @@ canvas {
   image-rendering: auto;
 }
 
-/* Scrollbar — uses theme tokens */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--hexis-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--hexis-borderHi); }
+/* ─── Codicons (VS Code icon font) ─── */
+/* The font is imported once in main.jsx. Any bare <i class="codicon..."/>
+   usage falls back to this default size; our <Icon/> wrapper overrides
+   per-call via inline font-size. */
+.codicon {
+  font-family: 'codicon';
+  font-size: 16px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Scrollbars — thin, themed, brighten on hover ─── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(166, 180, 196, 0.22) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-corner { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(166, 180, 196, 0.22);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background-color 120ms ease;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(166, 180, 196, 0.42);
+  background-clip: content-box;
+}
+
+/* ─── Keyboard focus ring ─── */
+:focus-visible {
+  outline: 2px solid var(--hexis-accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+/* Default button transitions — every clickable chrome element glides */
+button {
+  transition: background-color 120ms ease,
+              color 120ms ease,
+              border-color 120ms ease;
+}
 
 /* Transitions */
 .transition-panel {

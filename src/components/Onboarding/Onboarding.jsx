@@ -14,7 +14,28 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { usePrefsStore } from '../../stores/prefsStore.js';
-import { colors, easing } from '../../theme/tokens.js';
+import { Icon } from '../common/Icon.jsx';
+import { W } from '../../theme/window-tokens.js';
+
+// Easing shorthand (the legacy theme/tokens.js was deleted).
+const easing = {
+  default:    'cubic-bezier(0.25, 0.1, 0.25, 1)',
+  decelerate: 'cubic-bezier(0, 0, 0.2, 1)',
+  microspring: 'cubic-bezier(0.22, 1.2, 0.36, 1)',
+};
+
+// Colour shims that map old names to the live `W.*` theme.
+const colors = {
+  accent:         W.accent,
+  accentHover:    W.accentHover,
+  bgDeep:         W.bg0,
+  bgBase:         W.bg1,
+  bgSurface:      W.bg2,
+  bgElevated:     W.bg3,
+  textPrimary:    W.text,
+  textSecondary:  W.textDim,
+  textTertiary:   W.textMuted,
+};
 
 // ─── Step definitions ────────────────────────────────────────────
 
@@ -25,7 +46,7 @@ const STEPS = [
     description:
       'Your codebase, visualized as a living honeycomb. Every file is a hex cell, every folder a cluster. Navigate, edit, and command your project from a single surface.',
     spotlight: null, // centered card, no spotlight target
-    icon: '⬡',
+    icon: '⬡', // intentional brand mark — no Codicon hexagon
   },
   {
     id: 'honeycomb',
@@ -33,7 +54,7 @@ const STEPS = [
     description:
       'Each hexagon represents a file in your project. Colors map to folder groups — related files cluster together so you can see architecture at a glance.',
     spotlight: 'hex-grid',
-    icon: '🍯',
+    icon: <Icon name="layout" size={W.iconXl} />,
   },
   {
     id: 'click-to-edit',
@@ -41,7 +62,7 @@ const STEPS = [
     description:
       'Click any hex to open its file in the editor panel. Double-click to zoom the grid onto that cell. Your changes auto-save.',
     spotlight: 'hex-cell',
-    icon: '✏️',
+    icon: <Icon name="edit" size={W.iconXl} />,
   },
   {
     id: 'ai-agents',
@@ -49,7 +70,7 @@ const STEPS = [
     description:
       'Press Ctrl+I or tap the bee button to summon AI agents. Describe a task — the hive will plan, code, test, and review it for you.',
     spotlight: 'ai-button',
-    icon: '🐝',
+    icon: <Icon name="hubot" size={W.iconXl} />,
   },
   {
     id: 'command-palette',
@@ -57,7 +78,7 @@ const STEPS = [
     description:
       'Ctrl+K opens the command palette — fuzzy-search files, run commands, switch branches. Ctrl+G opens the git panel for commits, pushes, and diffs.',
     spotlight: 'status-bar',
-    icon: '⌘',
+    icon: <Icon name="keyboard" size={W.iconXl} />,
   },
 ];
 

@@ -17,10 +17,11 @@
 - Honey-themed syntax highlighting
 
 ### Dock System
-- Six panels (AI, Git, Editor, Terminal, Timeline, Tasks) dock to left, right, or bottom zones, or float freely
+- Panels (Editor + embedded file tree, AI, Chat, Git, Search, Bookmarks, Local History, Terminal, Timeline, Tasks) dock to left/right/bottom or float freely
 - Drag any panel header to reposition; snap zones highlight the target edge with a live amber preview
 - Per-panel collapse, maximize, and close controls in the header
 - Size and position persisted in `panelStore` across sessions
+- Editor panel hosts a collapsible VS Code–style file tree sidebar (Ctrl+Shift+E)
 
 ### Git Integration
 - Branch management: create, checkout, delete, merge
@@ -50,10 +51,6 @@
 - Structured JSON output via per-stage schemas (plan, review, task-writer)
 - Subscription auth by default (OAuth via Claude Code CLI, no API key required)
 
-### Force Graph View (experimental)
-
-An alternate force-directed graph view of the same project data lives under `src/components/graph/` (GraphCanvas, NodeRenderer, Minimap, GroupOverlay). It renders nodes on a static hex layout via `react-force-graph-2d`, with edge-type highlighting and hex-anchored positions. Currently not wired into the main App — reserved for future toggle between hex-grid and force-graph views.
-
 ### More
 - **Command Palette** (Ctrl+K) — fuzzy search files, commands, branches
 - **Terminal** (Ctrl+`) — integrated shell
@@ -66,13 +63,17 @@ An alternate force-directed graph view of the same project data lives under `src
 
 | Shortcut | Action |
 |----------|--------|
+| `Ctrl+O` | Open folder (native picker) |
 | `Ctrl+K` | Command palette |
+| `Ctrl+Shift+E` | Toggle file tree explorer |
+| `Ctrl+Shift+L` | Re-optimize hex layout |
 | `Ctrl+I` | AI agents panel |
 | `Ctrl+G` | Git panel |
 | `Ctrl+T` | History timeline |
 | `Ctrl+B` | Task board |
 | `` Ctrl+` `` | Terminal |
 | `Ctrl+S` | Save file |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo file operations |
 | `Escape` | Deselect / close |
 
 ## Quick Start
@@ -97,6 +98,44 @@ npm test
 ```
 
 After `npm link` or global install, the `hexis` command is available on PATH.
+
+## Using Hexis on your project
+
+Hexis is a standalone IDE — you don't need to fork it or copy files into
+your project. Install once, then open any folder:
+
+```bash
+# Tauri desktop app (recommended for day-to-day use)
+npm run tauri:build                    # produces a .exe / .dmg / .AppImage
+# then launch it and click File → Open Folder (or Ctrl+O) to pick any project
+
+# CLI — pass the target directory as an argument
+hexis /path/to/your/project
+node cli.js /path/to/your/project
+
+# Environment variable — handy for scripts and launchers
+HEXIS_TARGET=/path/to/your/project npm run dev
+```
+
+Inside each project you open, Hexis creates a `.hexis/` folder for its
+runtime state. Most of what lives there is regenerated on demand — add
+this block to **your project's `.gitignore`**:
+
+```gitignore
+# ─── Hexis IDE runtime artifacts ───
+.hexis/layout.json            # hex grid group positions cache
+.hexis/state-*.json           # per-agent-run state snapshots
+.hexis/memories/research/     # generated per-run research reports
+.hexis/memories/runs/         # episodic memory per run
+```
+
+The one file worth committing is `.hexis/memories/learned.md` — a
+distilled set of conventions that review agents accumulate as they work
+on your codebase. It's project content, not runtime junk.
+
+Everything Hexis stores is per-workspace: bookmarks, local history,
+task board, hex layout, and undo history are all keyed by the folder
+path so opening a different project gives you a clean slate.
 
 ## Architecture
 

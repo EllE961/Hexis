@@ -7,6 +7,7 @@
 
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAgentStore, AGENT_ROLES } from '../../stores/agentStore.js';
+import { Icon } from '../common/Icon.jsx';
 import { W } from '../../theme/window-tokens.js';
 
 // ─── Phase definitions ───
@@ -168,13 +169,15 @@ export default function AIPanel() {
             }}>
               <div style={{ fontSize: 11, color: C.muted, display: 'flex', alignItems: 'center', gap: 10 }}>
                 {writerCount > 0 && (
-                  <span style={{ color: W.accent }}>
-                    ✎ Refining {writerCount}…
+                  <span style={{ color: W.accent, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Icon name="sparkle" size={W.iconSm} color="inherit" />
+                    Refining {writerCount}…
                   </span>
                 )}
                 {activeRunCount > 0 && (
-                  <span style={{ color: W.accent }}>
-                    🐝 {activeRunCount} bee swarm{activeRunCount !== 1 ? 's' : ''} active
+                  <span style={{ color: W.accent, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Icon name="hubot" size={W.iconSm} color="inherit" />
+                    {activeRunCount} bee swarm{activeRunCount !== 1 ? 's' : ''} active
                   </span>
                 )}
                 {!activeRunCount && writerCount === 0 && <span>Queue is idle</span>}
@@ -411,7 +414,7 @@ function RunCard({ run, isFocused, streamOutput, allAgents, onFocus, onCancel, o
             color: C.muted, fontSize: 11, cursor: 'pointer', padding: 2,
           }}
         >
-          {expanded ? '▾' : '▸'}
+          <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={W.iconSm} color="inherit" />
         </button>
       </div>
 
@@ -473,8 +476,8 @@ function RunCard({ run, isFocused, streamOutput, allAgents, onFocus, onCancel, o
               {run.subtasks?.length > 0 && (
                 <div style={{ marginTop: 6, fontSize: 11 }}>
                   {run.subtasks.slice(0, 5).map(st => (
-                    <div key={st.id} style={{ display: 'flex', gap: 6, color: st.status === 'done' ? W.green : C.muted }}>
-                      <span>{st.status === 'done' ? '✓' : '○'}</span>
+                    <div key={st.id} style={{ display: 'flex', alignItems: 'center', gap: 6, color: st.status === 'done' ? W.green : C.muted }}>
+                      <Icon name={st.status === 'done' ? 'pass-filled' : 'circle-large-outline'} size={W.iconSm} color="inherit" />
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{st.title}</span>
                     </div>
                   ))}
@@ -514,8 +517,10 @@ function RunCard({ run, isFocused, streamOutput, allAgents, onFocus, onCancel, o
               <div style={{
                 fontWeight: 600, fontSize: 11, marginBottom: 4,
                 color: run.review.approved ? W.green : W.red,
+                display: 'inline-flex', alignItems: 'center', gap: 4,
               }}>
-                {run.review.approved ? '✓ Approved' : '✗ Issues'}{run.review.confidence != null ? ` · ${Math.round(run.review.confidence * 100)}% confidence` : ''}
+                <Icon name={run.review.approved ? 'pass-filled' : 'error'} size={W.iconSm} color="inherit" />
+                {run.review.approved ? 'Approved' : 'Issues'}{run.review.confidence != null ? ` · ${Math.round(run.review.confidence * 100)}% confidence` : ''}
               </div>
               {run.review.summary?.slice(0, 200)}
             </div>
@@ -574,11 +579,13 @@ function IdleMessage() {
       animation: 'fadeIn 0.4s ease',
     }}>
       <span style={{
-        fontSize: 32,
         animation: 'beeFloat 3s ease-in-out infinite',
-        display: 'block',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: W.accent,
       }}>
-        {'🐝'}
+        <Icon name="hubot" size={W.iconXl} color="inherit" />
       </span>
       <span style={{
         fontSize: 14,
@@ -645,7 +652,7 @@ function PhaseTracker({ phaseIndex, status }) {
                 whiteSpace: 'nowrap',
                 transition: 'all 0.3s ease',
               }}>
-                {isDone && <span style={{ fontSize: 10 }}>{'✓'}</span>}
+                {isDone && <Icon name="check" size={W.iconSm} color="inherit" />}
                 {isActive && (
                   <span style={{
                     width: 6,
@@ -734,13 +741,20 @@ function PlanDisplay({ plan, subtasks }) {
                 padding: '8px 14px',
               }}>
                 <span style={{
-                  fontSize: 13,
                   color: isDone ? C.success : isRunning ? C.accent : C.muted,
-                  width: 16,
-                  textAlign: 'center',
+                  width: W.icon,
+                  height: W.icon,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                   flexShrink: 0,
                 }}>
-                  {isDone ? '✓' : isRunning ? '◌' : '○'}
+                  <Icon
+                    name={isDone ? 'pass-filled' : isRunning ? 'loading' : 'circle-large-outline'}
+                    size={W.icon}
+                    color="inherit"
+                    className={isRunning ? 'codicon-modifier-spin' : ''}
+                  />
                 </span>
                 <span style={{
                   fontSize: 13,
@@ -901,13 +915,7 @@ function StatusMessage({ activeTask }) {
         border: `1px solid rgba(63, 185, 80, 0.15)`,
         animation: 'fadeIn 0.4s ease',
       }}>
-        <span style={{
-          fontSize: 15,
-          color: C.success,
-          fontWeight: 700,
-        }}>
-          {'✓'}
-        </span>
+        <Icon name="pass-filled" size={W.iconMd} color={C.success} />
         <span style={{
           fontSize: 14,
           fontWeight: 600,
@@ -1092,14 +1100,20 @@ function ReviewDisplay({ review }) {
                   padding: '5px 0',
                 }}>
                   <span style={{
-                    fontSize: 11,
                     color: sevColor,
                     marginTop: 2,
                     flexShrink: 0,
+                    display: 'inline-flex',
                   }}>
-                    {issue.severity === 'critical' ? '●'
-                      : issue.severity === 'major' ? '◐'
-                      : '○'}
+                    <Icon
+                      name={
+                        issue.severity === 'critical' ? 'circle-filled'
+                          : issue.severity === 'major' ? 'circle-large-filled'
+                          : 'circle-large-outline'
+                      }
+                      size={W.iconSm}
+                      color="inherit"
+                    />
                   </span>
                   <div style={{ fontSize: 12, color: C.dim, lineHeight: '17px' }}>
                     {issue.file && (

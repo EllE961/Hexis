@@ -5,52 +5,71 @@
  * History is bounded per-file (MAX_PER_FILE) and per-total (MAX_TOTAL)
  * to keep localStorage footprint reasonable.
  *
- * The UI lists snapshots for the current file with timestamps; clicking
- * one restores that version into the editor (as a dirty edit the user
- * can still undo).
- *
- * Storage strategy: IndexedDB would be better, but localStorage keeps
- * us dependency-free. We compress by storing only diffs vs the previous
- * snapshot when possible — but that's premature; start simple.
+ * Per-workspace persistence at `localStorage['hexis-local-history:<workspace>']`
+ * so snapshots from one project don't leak into another. Call
+ * `setWorkspace(path)` on workspace switch.
  */
 
 import { create } from 'zustand';
 
-const STORAGE_KEY = 'hexis-local-history';
+const STORAGE_PREFIX = 'hexis-local-history:';
+const LEGACY_KEY = 'hexis-local-history'; // pre-namespace key — migrated once
 const MAX_PER_FILE = 40;
 const MAX_TOTAL = 400;
 
-function load() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+function storageKey(workspace) {
+  return STORAGE_PREFIX + (workspace || 'default');
 }
 
-function save(entries) {
+function loadFor(workspace) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    const raw = localStorage.getItem(storageKey(workspace));
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+  } catch { /* fall through */ }
+  return [];
+}
+
+function saveFor(workspace, entries) {
+  try {
+    localStorage.setItem(storageKey(workspace), JSON.stringify(entries));
   } catch {
     // Quota exceeded — drop oldest half and retry once
     try {
       const trimmed = entries.slice(Math.floor(entries.length / 2));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+      localStorage.setItem(storageKey(workspace), JSON.stringify(trimmed));
     } catch { /* give up */ }
   }
 }
 
+// One-shot migration into 'default' bucket so existing users keep their data.
+function migrateLegacy() {
+  try {
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy && !localStorage.getItem(storageKey('default'))) {
+      localStorage.setItem(storageKey('default'), legacy);
+    }
+    if (legacy) localStorage.removeItem(LEGACY_KEY);
+  } catch { /* ignore */ }
+}
+migrateLegacy();
+
 export const useLocalHistoryStore = create((set, get) => ({
-  entries: load(),
+  workspace: null,
+  entries: [],
+
+  /** Switch workspace — loads that workspace's snapshot history. */
+  setWorkspace: (workspace) => {
+    if (get().workspace === workspace) return;
+    set({ workspace, entries: loadFor(workspace) });
+  },
 
   /** Record a new snapshot. Coalesces duplicates (same content as previous). */
   snapshot: (path, content) => {
     if (!path || content == null) return;
     set((s) => {
-      // Don't record if identical to the most recent snapshot for this file
       const lastForFile = s.entries.findLast
         ? s.entries.findLast((e) => e.path === path)
         : [...s.entries].reverse().find((e) => e.path === path);
@@ -72,7 +91,7 @@ export const useLocalHistoryStore = create((set, get) => ({
       // Enforce total cap
       if (next.length > MAX_TOTAL) next = next.slice(next.length - MAX_TOTAL);
 
-      save(next);
+      saveFor(s.workspace, next);
       return { entries: next };
     });
   },
@@ -87,13 +106,14 @@ export const useLocalHistoryStore = create((set, get) => ({
   clearFile: (path) => {
     set((s) => {
       const next = s.entries.filter((e) => e.path !== path);
-      save(next);
+      saveFor(s.workspace, next);
       return { entries: next };
     });
   },
 
   clearAll: () => {
-    save([]);
+    const s = get();
+    saveFor(s.workspace, []);
     set({ entries: [] });
   },
 }));

@@ -72,6 +72,7 @@ function saveChats(chats, activeId) {
         createdAt: c.createdAt,
         sessionId: c.sessionId,
         model: c.model,
+        lastContextFingerprint: c.lastContextFingerprint,
         messages: (c.messages || []).map(m => ({
           role: m.role,
           content: m.content,
@@ -84,6 +85,7 @@ function saveChats(chats, activeId) {
           cost: m.cost,
           fileChanges: m.fileChanges,
           mentions: m.mentions,
+          missingMentions: m.missingMentions,
           isHandoff: m.isHandoff,
           toolCalls: m.toolCalls,
           interrupted: m.interrupted,
@@ -92,6 +94,37 @@ function saveChats(chats, activeId) {
     }
     localStorage.setItem(storageKey(currentScope), JSON.stringify({ chats: slim, activeId }));
   } catch { /* ignore */ }
+}
+
+// Given a user-typed path that didn't exist, find the closest real
+// file by (1) exact basename match, (2) case-insensitive basename
+// match, (3) substring match on the full path. Returns null if
+// nothing reasonable comes up. Used for "did you mean …?" hints on
+// @file mentions that 404.
+export function suggestClosestPath(missing, projectFiles) {
+  if (!missing || !projectFiles?.length) return null;
+  const base = missing.split('/').pop()?.toLowerCase() || '';
+  if (!base) return null;
+  // Exact basename
+  for (const p of projectFiles) {
+    const pBase = p.split('/').pop()?.toLowerCase() || '';
+    if (pBase === base) return p;
+  }
+  // Same name without extension
+  const baseNoExt = base.replace(/\.[^.]+$/, '');
+  if (baseNoExt.length > 2) {
+    for (const p of projectFiles) {
+      const pBase = (p.split('/').pop() || '').toLowerCase();
+      const pBaseNoExt = pBase.replace(/\.[^.]+$/, '');
+      if (pBaseNoExt === baseNoExt) return p;
+    }
+  }
+  // Substring on full path
+  const lower = missing.toLowerCase();
+  for (const p of projectFiles) {
+    if (p.toLowerCase().includes(lower) || lower.includes(p.toLowerCase())) return p;
+  }
+  return null;
 }
 
 // Pull `@path/to/file.ext` tokens out of chat text. Respects fenced
@@ -331,6 +364,61 @@ export const useChatStore = create((set, get) => ({
       });
       return;
     }
+    if (/^\/mem\s+consolidate(?:\s|$)/i.test(text)) {
+      // Run the Haiku consolidator over learned.md. Shows the before→after
+      // counts and a preview of the new file as a chat reply.
+      set(state => {
+        const chats = { ...state.chats };
+        const c = chats[chatId];
+        if (!c) return state;
+        chats[chatId] = {
+          ...c,
+          messages: [...c.messages, { role: 'user', content: text, ts: Date.now() }],
+          sending: true,
+          streamBuffer: '',
+          error: null,
+        };
+        saveChats(chats, state.activeId);
+        return { chats };
+      });
+      try {
+        const res = await fetch('/api/memory/consolidate', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        const reply =
+          `**Memory consolidated** — ${data.before} → ${data.after} rules.\n\n` +
+          `Backup saved to \`${data.backup}\`.\n\n` +
+          `---\n\n${data.preview}\n\n---\n\nYou can view the full updated file in the Memory panel.`;
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = {
+            ...c,
+            messages: [...c.messages, { role: 'assistant', content: reply, ts: Date.now(), isHandoff: true }],
+            sending: false,
+            streamBuffer: '',
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      } catch (err) {
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = {
+            ...c,
+            sending: false,
+            error: err.message || String(err),
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      }
+      return;
+    }
+
     const memSearchMatch = /^\/mem\s+search\s+([\s\S]+)$/i.exec(text);
     if (memSearchMatch) {
       const q = memSearchMatch[1].trim();
@@ -567,55 +655,81 @@ export const useChatStore = create((set, get) => ({
     }
 
     // Auto-inject editor + git context as a compact header block.
-    // - Active editor file: the single path the user is currently
-    //   looking at. Agent doesn't need the full content unless it
-    //   was @-mentioned — just knowing which file is "in view" is
-    //   enough to bias intent classification ("this is probably
-    //   about that file").
-    // - Recently changed files: the top 5 from git working tree.
-    //   Keeps the agent aware of in-flight changes so its
-    //   recommendations don't conflict.
-    // - Relevant memory rules: top 3 matches against learned.md.
-    //   Injected every turn (cheap — it's just a small text block,
-    //   and the prompt cache handles repeats).
     //
-    // Editor + git are only injected on the FIRST turn of each
-    // session (when sessionId is null) — cached preamble carries
-    // them forward across subsequent turns at zero token cost.
+    // **Smart diffing**: We compute a `contextFingerprint` of the
+    // current editor+git state (just the tuple of relevant fields).
+    // If it matches `chat.lastContextFingerprint`, we skip
+    // re-injection — the agent already has this context from a
+    // prior turn in this session. Saves ~50-150 tokens per
+    // steady-state turn where nothing changed.
+    //
     // Memory rules re-inject every turn because the "relevant"
     // set depends on the specific prompt.
     let contextHeader = '';
     const contextParts = [];
-    if (!chat.sessionId) {
-      try {
-        const { useEditorStore } = await import('./editorStore.js');
-        const { useGitStore } = await import('./gitStore.js');
-        const editor = useEditorStore.getState();
-        const git = useGitStore.getState();
-        if (editor.activeTab) {
-          contextParts.push(`**Currently viewing**: \`${editor.activeTab}\``);
+    let nextContextFingerprint = chat.lastContextFingerprint || null;
+    try {
+      const { useEditorStore } = await import('./editorStore.js');
+      const { useGitStore } = await import('./gitStore.js');
+      const editor = useEditorStore.getState();
+      const git = useGitStore.getState();
+      const activeFile = editor.activeTab || null;
+      const changed = [
+        ...(git.staged || []),
+        ...(git.modified || []),
+        ...(git.untracked || []),
+      ].slice(0, 5);
+      // Fingerprint: ignore order changes, just care about set membership
+      const fp = JSON.stringify({
+        a: activeFile,
+        c: [...changed].sort(),
+      });
+      // Inject the header when:
+      //   - it's the first turn of a session (no prior fingerprint), OR
+      //   - the fingerprint changed (user opened a different file,
+      //     git status changed, etc)
+      const shouldInject = !chat.sessionId || fp !== chat.lastContextFingerprint;
+      if (shouldInject) {
+        if (activeFile) {
+          contextParts.push(`**Currently viewing**: \`${activeFile}\``);
         }
-        const changed = [
-          ...(git.staged || []),
-          ...(git.modified || []),
-          ...(git.untracked || []),
-        ].slice(0, 5);
         if (changed.length > 0) {
           contextParts.push(`**Recently changed** (uncommitted): ${changed.map(f => `\`${f}\``).join(', ')}`);
         }
-      } catch {}
-    }
+        nextContextFingerprint = fp;
+      }
+    } catch {}
     // Memory rules — auto-inject the top 3 for the current prompt.
     // Only fires if the user's message has >= 2 meaningful words.
+    // Passes the list of "current focus files" (editor active tab +
+    // extracted @mentions) as a `files` filter so scoped rules get
+    // boosted when their glob matches one of those paths.
     try {
       const meaningful = text.trim().split(/\s+/).filter(w => w.length > 3).length;
       if (meaningful >= 2) {
-        const res = await fetch(
-          `/api/memory/search?q=${encodeURIComponent(text.slice(0, 200))}&limit=3`,
-        );
+        const focusFiles = [];
+        try {
+          const { useEditorStore } = await import('./editorStore.js');
+          const active = useEditorStore.getState().activeTab;
+          if (active) focusFiles.push(active);
+        } catch {}
+        // @mentions already extracted earlier in this function —
+        // re-extract here so we can use them for rule scoping.
+        for (const p of extractMentions(text)) focusFiles.push(p);
+        const params = new URLSearchParams({
+          q: text.slice(0, 200),
+          limit: '3',
+        });
+        if (focusFiles.length > 0) params.set('files', focusFiles.join(','));
+        const res = await fetch(`/api/memory/search?${params.toString()}`);
         if (res.ok) {
           const data = await res.json();
-          const rules = (data.results || []).map(r => `- ${r.rule}`);
+          const rules = (data.results || []).map(r => {
+            const scopeNote = r.scopes?.length > 0
+              ? ` _(scope: ${r.scopes.join(', ')})_`
+              : '';
+            return `- ${r.rule}${scopeNote}`;
+          });
           if (rules.length > 0) {
             contextParts.push(
               `**Project conventions (from learned.md, matched to your prompt):**\n${rules.join('\n')}`,
@@ -646,32 +760,52 @@ export const useChatStore = create((set, get) => ({
     const mentionedPaths = extractMentions(text);
     let augmentedPrompt = contextHeader + text;
     const resolvedMentions = [];
+    const missingMentions = [];
     if (mentionedPaths.length > 0) {
       const toFetch = mentionedPaths.slice(0, 6);
+      // Fetch in parallel; a 404 means the file doesn't exist —
+      // we record it as a "missing" mention so the UI can flag
+      // it with a "did you mean …?" suggestion.
       const results = await Promise.all(
         toFetch.map(p =>
           fetch(`/api/file?path=${encodeURIComponent(p)}`)
-            .then(r => r.ok ? r.json() : null)
-            .catch(() => null)
+            .then(async r => ({ ok: r.ok, status: r.status, path: p, data: r.ok ? await r.json() : null }))
+            .catch(() => ({ ok: false, status: 0, path: p, data: null }))
         )
       );
       const blocks = [];
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        if (!r || !r.content) continue;
-        // Truncate large files — 32 KB + 400 lines hard cap
-        let body = r.content;
-        const lines = body.split('\n');
-        if (lines.length > 400) {
-          body = lines.slice(0, 400).join('\n') +
-                 `\n\n[… ${lines.length - 400} more lines truncated]`;
-        }
-        if (body.length > 32_768) {
-          body = body.slice(0, 32_768) + '\n\n[… truncated at 32 KB]';
-        }
-        blocks.push(`### @${r.path}\n\`\`\`\n${body}\n\`\`\``);
-        resolvedMentions.push(r.path);
+
+      // Load the project file list once (for "did you mean" suggestions
+      // on missing paths). Fallback to [] if the fetch fails.
+      let projectFiles = [];
+      if (results.some(r => !r.ok)) {
+        try {
+          const g = await fetch('/api/graph').then(r => r.ok ? r.json() : null);
+          projectFiles = (g?.nodes || []).map(n => n.id).filter(Boolean);
+        } catch {}
       }
+
+      for (const r of results) {
+        if (r.ok && r.data?.content) {
+          let body = r.data.content;
+          const lines = body.split('\n');
+          if (lines.length > 400) {
+            body = lines.slice(0, 400).join('\n') +
+                   `\n\n[… ${lines.length - 400} more lines truncated]`;
+          }
+          if (body.length > 32_768) {
+            body = body.slice(0, 32_768) + '\n\n[… truncated at 32 KB]';
+          }
+          blocks.push(`### @${r.data.path}\n\`\`\`\n${body}\n\`\`\``);
+          resolvedMentions.push(r.data.path);
+        } else {
+          // Missing file — find the closest match in the project
+          // by simple substring / basename match
+          const suggestion = suggestClosestPath(r.path, projectFiles);
+          missingMentions.push({ path: r.path, suggestion });
+        }
+      }
+
       if (blocks.length > 0) {
         augmentedPrompt =
           contextHeader +
@@ -689,6 +823,7 @@ export const useChatStore = create((set, get) => ({
       content: text,
       ts: Date.now(),
       mentions: resolvedMentions,
+      missingMentions,
     };
     set(state => {
       const chats = { ...state.chats };
@@ -698,6 +833,9 @@ export const useChatStore = create((set, get) => ({
         sending: true,
         streamBuffer: '',
         error: null,
+        // Record the fingerprint so the next turn can skip
+        // re-injecting unchanged editor+git state.
+        lastContextFingerprint: nextContextFingerprint,
       };
       saveChats(chats, state.activeId);
       return { chats };

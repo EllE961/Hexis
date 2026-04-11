@@ -1064,16 +1064,117 @@ app.get('/api/memory/learned', async (_req, res) => {
   }
 });
 
+// Haiku-powered consolidation of learned.md:
+//   - Read the current file
+//   - Back it up to learned.YYYY-MM-DD.md.bak
+//   - Ask Haiku to dedupe similar rules, drop clearly-outdated ones,
+//     and organize remaining rules into categories (Rules / File
+//     conventions / Pitfalls / Facts)
+//   - Write the organized result back to learned.md
+//
+// Response: { before: n, after: n, backup: path, preview: string }
+// Returns 400 if learned.md doesn't exist or has < 5 rules (not
+// worth running Haiku for small files).
+app.post('/api/memory/consolidate', async (_req, res) => {
+  try {
+    const { readFile, writeFile, mkdir } = await import('fs/promises');
+    const memDir = resolve(REPO_PATH, '.hexis', 'memories');
+    const path = resolve(memDir, 'learned.md');
+    let content = '';
+    try { content = await readFile(path, 'utf-8'); }
+    catch { return res.status(404).json({ error: 'learned.md does not exist yet' }); }
+
+    const beforeRules = content.split(/\r?\n/).filter(l => /^\s*-\s+/.test(l));
+    if (beforeRules.length < 5) {
+      return res.status(400).json({
+        error: `Only ${beforeRules.length} rules in learned.md — not worth consolidating yet (needs ≥ 5).`,
+      });
+    }
+
+    // Backup current file
+    await mkdir(memDir, { recursive: true });
+    const stamp = new Date().toISOString().slice(0, 10);
+    const backupPath = resolve(memDir, `learned.${stamp}.md.bak`);
+    await writeFile(backupPath, content, 'utf-8');
+
+    // Ask Haiku to consolidate
+    const consolidatePrompt = `You are reorganizing a project memory file. Here are the current rules — each a short bullet. Some are duplicates, some are outdated, some could be merged.
+
+TASK:
+1. Dedupe: merge bullets that say substantially the same thing. Keep the clearest phrasing.
+2. Drop obviously outdated/contradictory rules (keep the newest).
+3. Organize the remaining bullets into these sections in order:
+   ## Rules       (general do / don't statements)
+   ## File conventions  (rules that apply to a specific file or directory)
+   ## Pitfalls    (gotchas, bugs to avoid, things that broke before)
+   ## Facts       (neutral facts about the codebase)
+4. Preserve any existing \`[scope: ...]\` tags verbatim — they're part of the rule.
+5. Keep the \`_(source, date)_\` italic footers from the originals if present.
+6. Output ONLY the markdown file contents. No preamble, no explanation.
+
+Current learned.md contents:
+\`\`\`
+${content}
+\`\`\``;
+
+    const stream = query({
+      prompt: consolidatePrompt,
+      options: {
+        cwd: REPO_PATH,
+        model: 'haiku',
+        effort: 'low',
+        allowedTools: [],
+        permissionMode: 'plan',
+        maxTurns: 1,
+        settingSources: [],
+      },
+    });
+    let result = '';
+    for await (const message of stream) {
+      if (message.type === 'assistant' && message.message?.content) {
+        for (const block of message.message.content) {
+          if (block.type === 'text') result += block.text;
+        }
+      }
+    }
+    const consolidated = result.trim();
+    if (!consolidated || consolidated.length < 100) {
+      return res.status(500).json({ error: 'Consolidator returned empty or too-short result' });
+    }
+
+    await writeFile(path, consolidated, 'utf-8');
+
+    const afterRules = consolidated.split(/\r?\n/).filter(l => /^\s*-\s+/.test(l));
+    res.json({
+      ok: true,
+      before: beforeRules.length,
+      after: afterRules.length,
+      backup: `.hexis/memories/learned.${stamp}.md.bak`,
+      preview: consolidated.slice(0, 1200),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Search learned.md for rules matching a query. Used by /mem search
-// in chat and by the auto-inject context header. Returns the top N
-// matching rules by simple keyword score. Each rule is a single
-// markdown bullet; we split on `\n- ` and rank by how many query
-// terms appear in it (case-insensitive).
-// Query: ?q=<text>&limit=5
+// in chat and by the auto-inject context header.
+//
+// Rules can carry a scope tag: `- rule text [scope: src/components/*]`
+// (glob pattern). When the request includes a `files` parameter
+// (comma-separated paths), rules matching any of those files via
+// their scope get a score boost. Global rules (no scope tag) always
+// qualify. File-scoped rules only qualify when their glob matches at
+// least one supplied file.
+//
+// Query: ?q=<text>&limit=5&files=src/a.js,src/b.js
 app.get('/api/memory/search', async (req, res) => {
   const q = (req.query.q || '').trim();
   const limit = Math.max(1, Math.min(20, parseInt(req.query.limit || '5', 10)));
-  if (!q) return res.json({ results: [] });
+  const files = (req.query.files || '')
+    .split(',')
+    .map(f => f.trim())
+    .filter(Boolean);
   try {
     const { readFile } = await import('fs/promises');
     const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
@@ -1081,10 +1182,43 @@ app.get('/api/memory/search', async (req, res) => {
     try { content = await readFile(path, 'utf-8'); } catch { return res.json({ results: [] }); }
 
     // Extract bullet rules (lines starting with `- `)
-    const rules = [];
+    const rawRules = [];
     for (const line of content.split(/\r?\n/)) {
       const m = /^\s*-\s+(.+)$/.exec(line);
-      if (m) rules.push(m[1]);
+      if (m) rawRules.push(m[1]);
+    }
+
+    // Parse each rule for its scope tag and strip the tag from the text.
+    // Format: `text [scope: glob1, glob2]` → { rule: 'text', scopes: ['glob1', 'glob2'] }
+    const parsed = rawRules.map(raw => {
+      const m = /^(.*?)\s*\[scope:\s*([^\]]+)\]\s*$/i.exec(raw);
+      if (m) {
+        return {
+          rule: m[1].trim(),
+          scopes: m[2].split(',').map(s => s.trim()).filter(Boolean),
+        };
+      }
+      return { rule: raw, scopes: [] };
+    });
+
+    // If no query AND no file filter, return empty (avoid dumping the
+    // whole file via an unrelated GET).
+    if (!q && files.length === 0) return res.json({ results: [] });
+
+    // Filter by scope if a file filter is present:
+    // - Global rules (no scopes) always qualify
+    // - Scoped rules must match at least one file
+    const scopeFiltered = files.length === 0
+      ? parsed
+      : parsed.filter(p =>
+          p.scopes.length === 0 ||
+          p.scopes.some(s => files.some(f => matchGlob(f, s))));
+
+    // If no query, return the filtered list as-is (up to `limit`)
+    if (!q) {
+      return res.json({
+        results: scopeFiltered.slice(0, limit).map(p => ({ rule: p.rule, score: 1, scopes: p.scopes })),
+      });
     }
 
     // Token-level match with a score; dedupe stopwords and short tokens
@@ -1092,13 +1226,16 @@ app.get('/api/memory/search', async (req, res) => {
     const terms = q.toLowerCase().split(/\s+/).filter(t => t.length > 2 && !STOP.has(t));
     if (terms.length === 0) return res.json({ results: [] });
 
-    const scored = rules.map(rule => {
-      const lower = rule.toLowerCase();
+    const scored = scopeFiltered.map(p => {
+      const lower = p.rule.toLowerCase();
       let score = 0;
       for (const t of terms) {
         if (lower.includes(t)) score += 1;
       }
-      return { rule, score };
+      // File-scoped rules that MATCHED the file filter get a boost —
+      // they're more specific than global rules and should rank first.
+      if (files.length > 0 && p.scopes.length > 0) score += 0.5;
+      return { rule: p.rule, score, scopes: p.scopes };
     }).filter(r => r.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
@@ -1108,6 +1245,22 @@ app.get('/api/memory/search', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Tiny glob matcher — supports `*` (any except `/`) and `**` (any).
+// Good enough for scope tags like `src/components/*.jsx` or
+// `server/**/*.js`. Not a full glob spec.
+function matchGlob(path, pattern) {
+  const re = new RegExp(
+    '^' +
+    pattern
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')   // escape regex specials
+      .replace(/\*\*/g, '<<DOUBLE>>')          // placeholder for **
+      .replace(/\*/g, '[^/]*')                 // single * → any non-slash
+      .replace(/<<DOUBLE>>/g, '.*') +          // ** → anything
+    '$',
+  );
+  return re.test(path);
+}
 
 // Append a rule to .hexis/memories/learned.md. Used by the chat
 // "star to memory" button and future programmatic memory ops.

@@ -489,6 +489,7 @@ export default function ChatPanel() {
           }}>
             {chat?.title || 'Chat'}
           </div>
+          <ContextBudget chat={chat} />
           <select
             value={chat?.model || 'sonnet'}
             onChange={e => setModel(activeId, e.target.value)}
@@ -635,6 +636,7 @@ export default function ChatPanel() {
               fileChanges={m.fileChanges}
               isHandoff={m.isHandoff}
               mentions={m.mentions}
+              missingMentions={m.missingMentions}
               toolCalls={m.toolCalls}
               interrupted={m.interrupted}
               // The Deep review button re-submits the PRECEDING user
@@ -805,7 +807,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff, mentions, toolCalls, interrupted }) {
+function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff, mentions, missingMentions, toolCalls, interrupted }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -914,6 +916,42 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
               color: '#58a6ff',
             }}>
               @{f}
+            </span>
+          ))}
+        </div>
+      )}
+      {/* Missing @mentions — files that didn't exist on disk. Shows
+          a red pill with the bad path + a "did you mean …" suggestion
+          if we could find something close. Helps the user catch typos
+          and stops the agent from chasing hallucinated paths. */}
+      {isUser && missingMentions?.length > 0 && (
+        <div style={{
+          marginTop: W.s1,
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: W.s1,
+          alignItems: 'center',
+          maxWidth: '85%',
+        }}>
+          <span style={{ fontSize: W.fontSm, color: W.red, marginRight: W.s2 }}>
+            ⚠ not found
+          </span>
+          {missingMentions.map((mm, i) => (
+            <span key={i} style={{
+              padding: `2px ${W.s2}px`,
+              background: 'rgba(248, 81, 73, 0.08)',
+              border: `1px solid rgba(248, 81, 73, 0.35)`,
+              borderRadius: W.radius1,
+              fontSize: W.fontSm,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              color: W.red,
+            }}>
+              @{mm.path}
+              {mm.suggestion && (
+                <span style={{ color: W.textDim, marginLeft: 6 }}>
+                  → did you mean @{mm.suggestion}?
+                </span>
+              )}
             </span>
           ))}
         </div>
@@ -1361,11 +1399,25 @@ function CostFooter({ tokensIn, tokensOut, cachedRead, tokensTotal, cost }) {
   if (!hasBreakdown) {
     return <span>{(tokensTotal || 0).toLocaleString()} tok · ${cost?.toFixed(4) || '0.0000'}</span>;
   }
+  // Cache hit rate as a % of input tokens. Green above 80, amber
+  // between 40 and 80, red below 40. Turns 2+ should almost always
+  // be green since the session-resume cache kicks in.
+  const totalIn = (tokensIn || 0) + (cachedRead || 0);
+  const hitPct = totalIn > 0 ? Math.round(((cachedRead || 0) / totalIn) * 100) : 0;
+  const hitColor =
+    hitPct >= 80 ? '#4ade80' :  // green
+    hitPct >= 40 ? W.accent :   // amber
+                   W.red;       // red
   return (
     <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
       <span>{fmtCount(tokensIn)}↑ / {fmtCount(tokensOut)}↓</span>
       {cachedRead > 0 && (
-        <span style={{ color: W.textDim }}>· {fmtCount(cachedRead)} cached</span>
+        <span
+          style={{ color: hitColor, fontWeight: W.fontWeightSemi }}
+          title={`${fmtCount(cachedRead)} tokens served from prompt cache`}
+        >
+          · {hitPct}% cached
+        </span>
       )}
       <span>· ${cost?.toFixed(4) || '0.0000'}</span>
     </span>
@@ -1487,6 +1539,7 @@ const SLASH_HINTS = [
   { cmd: '/task',     desc: 'full agent pipeline with Critic review' },
   { cmd: '/compact',  desc: 'summarize older turns to free context' },
   { cmd: '/mem search', desc: 'search project memory (learned.md)' },
+  { cmd: '/mem consolidate', desc: 'dedupe + categorize learned.md via Haiku' },
   { cmd: '/clear',    desc: 'wipe this chat and start fresh' },
   { cmd: '/model',    desc: 'switch model (sonnet | opus)' },
   { cmd: '/help',     desc: 'show all commands and shortcuts' },
@@ -1641,6 +1694,57 @@ function MentionPopup({ matches, activeIdx, onPick, onHover }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Context budget indicator in the chat header. Estimates current
+// context window usage by summing tokens from the most recent
+// message's tokensIn + cachedRead (since cached tokens still count
+// toward the window, just at near-zero cost). Only visible once
+// usage crosses 25% of the model window. Colors: green < 70%,
+// amber 70-90%, red > 90%. Suggests /compact when > 90%.
+//
+// Model windows (reasonable defaults; override if the SDK reports
+// different values):
+//   - Haiku / Sonnet: 200 000 tokens
+//   - Opus: 200 000 tokens
+function ContextBudget({ chat }) {
+  if (!chat) return null;
+  // Use the most recent assistant message's token count as a proxy
+  // for current session input size. The SDK's cache_read_input_tokens
+  // naturally reflects everything carried into the turn.
+  const lastAssistant = [...(chat.messages || [])]
+    .reverse()
+    .find(m => m.role === 'assistant' && !m.isHandoff && (m.tokensIn || m.cachedRead));
+  if (!lastAssistant) return null;
+  const used = (lastAssistant.tokensIn || 0) + (lastAssistant.cachedRead || 0);
+  const maxWindow = 200_000; // Sonnet / Opus default
+  const pct = Math.min(100, Math.round((used / maxWindow) * 100));
+  if (pct < 25) return null; // don't show when plenty of headroom
+  const color =
+    pct >= 90 ? W.red :
+    pct >= 70 ? W.accent :
+                '#4ade80';
+  return (
+    <div
+      title={`Session context: ${fmtCount(used)} of ~${fmtCount(maxWindow)} tokens used.${pct >= 90 ? ' Run /compact to free space.' : ''}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '2px 8px',
+        border: `1px solid ${color}`,
+        borderRadius: W.radius1,
+        color,
+        fontSize: 10,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontWeight: W.fontWeightSemi,
+      }}
+    >
+      <span>{fmtCount(used)} / {fmtCount(maxWindow)}</span>
+      <span>·</span>
+      <span>{pct}%</span>
     </div>
   );
 }

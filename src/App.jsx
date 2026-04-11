@@ -1657,9 +1657,10 @@ export default function App() {
         const inputFocused = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
         if (!inputFocused) {
           e.preventDefault();
-          // Ensure the chat panel is visible, then fire the focus event
-          usePanelStore.getState().showPanel('chat');
-          // Defer to next tick so ChatPanel has rendered if it was hidden
+          // revealPanel shows the chat panel AND makes it the active tab
+          // in its dock zone (so if it was behind AI Agents, bring it to
+          // the front). Then fire the focus event on the next tick.
+          usePanelStore.getState().revealPanel('chat');
           setTimeout(() => {
             window.dispatchEvent(new Event('hexis:focus-chat'));
           }, 0);

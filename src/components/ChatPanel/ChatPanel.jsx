@@ -65,22 +65,32 @@ export default function ChatPanel() {
   // Autofocus the textarea on mount and whenever the active chat changes,
   // so "open Hexis → start typing" works without a mouse click. Guard
   // against stealing focus from modals, the editor, or another text input.
+  // We poll for a moment because the panel may be behind another tab in
+  // its dock zone — we only focus once the textarea becomes visible.
   useEffect(() => {
     const shouldFocus = () => {
       const active = document.activeElement;
       if (!active || active === document.body) return true;
-      // Never steal focus from a focused input / editor / modal button
       const tag = active.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return false;
       if (active.closest?.('.cm-editor')) return false;
       if (active.closest?.('[role="dialog"]')) return false;
       return true;
     };
-    if (shouldFocus()) {
-      // Slight delay so React has committed the layout before we focus
-      const t = setTimeout(() => textareaRef.current?.focus(), 0);
-      return () => clearTimeout(t);
-    }
+    if (!shouldFocus()) return;
+    let cancelled = false;
+    let tries = 0;
+    const tick = () => {
+      if (cancelled) return;
+      const ta = textareaRef.current;
+      if (ta && ta.offsetWidth > 0 && ta.offsetHeight > 0) {
+        ta.focus();
+        return;
+      }
+      if (tries++ < 20) setTimeout(tick, 50); // retry up to ~1 second
+    };
+    tick();
+    return () => { cancelled = true; };
   }, [activeId]);
 
   // Listen for global `hexis:focus-chat` events (fired by Ctrl+/ from

@@ -167,6 +167,34 @@ export const usePanelStore = create((set, get) => ({
     return { panels: p, nextZIndex: s.nextZIndex + 1 };
   }),
 
+  // Bring a docked panel to the front of its dock zone's tab strip.
+  // Use this when you want to activate a panel that's already visible
+  // but hidden behind another tab (e.g. chat sharing a right dock with
+  // AI Agents). Also shows the panel if it was hidden.
+  revealPanel: (id) => set(s => {
+    const panel = s.panels[id];
+    if (!panel) return s;
+    const p = { ...s.panels };
+    let nextActive = s.activeTab;
+    if (!panel.visible) {
+      p[id] = { ...panel, visible: true, zIndex: s.nextZIndex };
+    } else {
+      p[id] = { ...panel, zIndex: s.nextZIndex };
+    }
+    // If docked, make this panel the active tab in its dock zone
+    const dock = panel.dock;
+    if (panel.mode === 'docked' && (dock === 'left' || dock === 'right' || dock === 'bottom')) {
+      nextActive = { ...s.activeTab, [dock]: id };
+    }
+    saveLayout(p);
+    return {
+      panels: p,
+      nextZIndex: s.nextZIndex + 1,
+      activeTab: nextActive,
+      focusedPanel: id,
+    };
+  }),
+
   hidePanel: (id) => set(s => {
     if (!s.panels[id]?.visible) return s;
     const p = { ...s.panels };

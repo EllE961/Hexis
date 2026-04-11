@@ -238,6 +238,18 @@ export const useChatStore = create((set, get) => ({
   //
   // Safe for multiple concurrent calls — each chat has its own sending flag
   // and streamBuffer, so background chats keep working while you view another.
+  //
+  // Slash commands:
+  //   /research <query>   — route to agentStore.submitResearchTask (6-phase
+  //                         research pipeline). Use for "best way to…",
+  //                         library comparisons, architecture vetting.
+  //   /task <description> — route to agentStore.submitTask (full
+  //                         Writer/Planner/Coder/Critic pipeline). Use when
+  //                         you KNOW you want the review gate.
+  //
+  // Each command posts a synthetic user message to the chat so the
+  // conversation history reflects what was asked, then an assistant
+  // "kicked off" follow-up once the agent run completes.
   sendMessage: async (content, targetId = null) => {
     const text = (content || '').trim();
     if (!text) return;
@@ -245,6 +257,69 @@ export const useChatStore = create((set, get) => ({
     const chatId = targetId || s.activeId;
     const chat = s.chats[chatId];
     if (!chat || chat.sending) return;
+
+    // Slash-command detection (must come BEFORE the chat turn flow so
+    // we don't use up a chat session ID on commands that aren't chat).
+    const slashMatch = /^\/(research|task)\s+([\s\S]+)$/i.exec(text);
+    if (slashMatch) {
+      const verb = slashMatch[1].toLowerCase();
+      const body = slashMatch[2].trim();
+      if (!body) return;
+
+      // Record the user message in the chat log so history is complete.
+      const userMsg = { role: 'user', content: text, ts: Date.now() };
+      set(state => {
+        const chats = { ...state.chats };
+        const c = chats[chatId];
+        if (!c) return state;
+        chats[chatId] = { ...c, messages: [...c.messages, userMsg] };
+        saveChats(chats, state.activeId);
+        return { chats };
+      });
+
+      // Dynamic import avoids a circular dep if someone ever wires
+      // agentStore to import chatStore.
+      const { useAgentStore } = await import('./agentStore.js');
+      const agent = useAgentStore.getState();
+
+      try {
+        if (verb === 'research') {
+          await agent.submitResearchTask(body, { createTasks: false });
+        } else {
+          await agent.submitTask(body);
+        }
+
+        // Drop a system-ish message so the chat shows the hand-off.
+        const note = verb === 'research'
+          ? `Started deep research → "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}" — watch the AI Agents panel for phase-by-phase progress.`
+          : `Queued full agent task → "${body.slice(0, 80)}${body.length > 80 ? '…' : ''}" — Writer/Planner/Coder/Critic pipeline running in the AI Agents panel.`;
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = {
+            ...c,
+            messages: [...c.messages, {
+              role: 'assistant',
+              content: note,
+              ts: Date.now(),
+              isHandoff: true,
+            }],
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      } catch (err) {
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = { ...c, error: err.message || String(err) };
+          return { chats };
+        });
+      }
+      return;
+    }
 
     // Push user message + mark chat as sending
     const userMsg = { role: 'user', content: text, ts: Date.now() };

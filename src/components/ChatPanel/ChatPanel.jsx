@@ -376,6 +376,17 @@ export default function ChatPanel() {
               cachedRead={m.cachedRead}
               cost={m.cost}
               fileChanges={m.fileChanges}
+              isHandoff={m.isHandoff}
+              // The Deep review button re-submits the PRECEDING user
+              // prompt through the full agent pipeline. Only show it
+              // on non-handoff assistant messages where the previous
+              // message was a user turn (so there's something to
+              // escalate to).
+              priorUserMessage={
+                m.role === 'assistant' && !m.isHandoff && messages[i - 1]?.role === 'user'
+                  ? messages[i - 1].content
+                  : null
+              }
             />
           ))}
           {sending && (
@@ -399,6 +410,15 @@ export default function ChatPanel() {
             </div>
           )}
         </div>
+
+        {/* Command hint — faint row showing slash-command options
+            when the user starts typing `/`, or on empty input. Fades
+            away once they're typing a real message. */}
+        <SlashHint input={input} />
+        {/* Auto-escalation hint — when the user's draft contains
+            high-complexity keywords, gently suggest `/task` instead
+            of a chat turn. Non-blocking: user can still hit Enter. */}
+        <EscalationHint input={input} onUseTask={() => setInput('/task ' + input.trim())} />
 
         {/* Input */}
         <form
@@ -499,7 +519,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges }) {
+function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -573,7 +593,58 @@ function Message({ role, content, tokens, tokensIn, tokensOut, cachedRead, cost,
       {!isUser && !streaming && fileChanges?.length > 0 && (
         <FileChangesRow files={fileChanges} />
       )}
+      {/* Deep review escalation: re-run the user's prompt through the
+          full Writer/Planner/Coder/Critic pipeline when the chat
+          answer looks promising but you want the 3-persona review
+          gate. Hidden on handoff / streaming / empty responses and
+          on the first message (no prior user turn to escalate). */}
+      {!isUser && !streaming && !isHandoff && priorUserMessage && (
+        <DeepReviewButton prompt={priorUserMessage} />
+      )}
     </div>
+  );
+}
+
+function DeepReviewButton({ prompt }) {
+  const [clicked, setClicked] = useState(false);
+  const handleClick = async () => {
+    if (clicked) return;
+    setClicked(true);
+    try {
+      const { useAgentStore } = await import('../../stores/agentStore.js');
+      await useAgentStore.getState().submitTask(prompt);
+      // Also reveal the AI Agents panel so the user sees the pipeline
+      const { usePanelStore } = await import('../../stores/panelStore.js');
+      usePanelStore.getState().revealPanel('ai');
+    } catch (err) {
+      console.warn('[deep-review] failed:', err);
+      setClicked(false);
+    }
+  };
+  return (
+    <button
+      onClick={handleClick}
+      disabled={clicked}
+      style={{
+        marginTop: W.s1,
+        alignSelf: 'flex-start',
+        padding: `${W.s1}px ${W.s2}px`,
+        background: clicked ? W.bg2 : 'transparent',
+        border: `1px solid ${W.border}`,
+        borderRadius: W.radius1,
+        color: clicked ? W.textDim : W.accent,
+        fontSize: W.fontSm,
+        fontFamily: W.fontFamily,
+        cursor: clicked ? 'default' : 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: W.s1,
+        transition: `all ${W.animFast}`,
+      }}
+      title="Re-run this prompt through the full Writer/Planner/Coder/Critic pipeline"
+    >
+      ⬡ {clicked ? 'Review running…' : 'Deep review'}
+    </button>
   );
 }
 
@@ -741,6 +812,109 @@ function Block({ block }) {
           {arg}
         </span>
       )}
+    </div>
+  );
+}
+
+// Slash command hint row. Renders above the input to advertise the
+// escalation routes without shouting — fades in when the user types
+// `/`, and always shows empty-state on an empty input.
+const SLASH_HINTS = [
+  { cmd: '/research', desc: 'deep research pipeline (plan → workers → critic → synth)' },
+  { cmd: '/task',     desc: 'full agent pipeline with Critic review' },
+];
+
+function SlashHint({ input }) {
+  const show = !input || input.trim().startsWith('/');
+  if (!show) return null;
+  const typed = (input || '').trim();
+  const filtered = typed
+    ? SLASH_HINTS.filter(h => h.cmd.startsWith(typed.split(/\s/)[0].toLowerCase()))
+    : SLASH_HINTS;
+  if (filtered.length === 0) return null;
+  return (
+    <div style={{
+      flexShrink: 0,
+      padding: `${W.s1}px ${W.s3}px`,
+      borderTop: `1px solid ${W.border}`,
+      background: W.bg1,
+      display: 'flex',
+      gap: W.s3,
+      flexWrap: 'wrap',
+      fontSize: W.fontSm,
+      color: W.textMuted,
+    }}>
+      {filtered.map(h => (
+        <span key={h.cmd} style={{ display: 'inline-flex', gap: W.s1, alignItems: 'center' }}>
+          <span style={{
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            color: W.accent,
+            fontWeight: W.fontWeightSemi,
+          }}>
+            {h.cmd}
+          </span>
+          <span style={{ opacity: 0.75 }}>{h.desc}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// Keywords that suggest the user is asking for a big, multi-file or
+// safety-critical change. When these appear in the draft, we gently
+// suggest /task (full pipeline) instead of a plain chat turn. Scanned
+// with word boundaries so we don't false-positive on substrings.
+const ESCALATION_KEYWORDS = [
+  'refactor', 'audit', 'security', 'migrate', 'migration',
+  'review', 'all files', 'across the codebase', 'entire',
+  'redesign', 'rewrite', 'architect',
+];
+const ESCALATION_RE = new RegExp(
+  '\\b(' + ESCALATION_KEYWORDS.map(k => k.replace(/\s+/g, '\\s+')).join('|') + ')\\b',
+  'i',
+);
+
+function EscalationHint({ input, onUseTask }) {
+  const draft = (input || '').trim();
+  // Don't show for empty, slash commands, or very short prompts
+  if (draft.length < 20) return null;
+  if (draft.startsWith('/')) return null;
+  const hit = ESCALATION_RE.exec(draft);
+  if (!hit) return null;
+  return (
+    <div style={{
+      flexShrink: 0,
+      padding: `${W.s2}px ${W.s3}px`,
+      borderTop: `1px solid ${W.border}`,
+      background: W.accentBg,
+      display: 'flex',
+      alignItems: 'center',
+      gap: W.s3,
+      fontSize: W.fontSm,
+      color: W.text,
+    }}>
+      <span style={{ color: W.accent, fontWeight: W.fontWeightSemi }}>⬡</span>
+      <span style={{ flex: 1 }}>
+        Detected <b>&ldquo;{hit[1]}&rdquo;</b> — looks like a multi-file task.
+        Consider the full pipeline (Writer → Planner → Coder → 3 Critics).
+      </span>
+      <button
+        type="button"
+        onClick={onUseTask}
+        style={{
+          padding: `${W.s1}px ${W.s2}px`,
+          background: W.accentBg,
+          border: `1px solid ${W.accent}`,
+          borderRadius: W.radius1,
+          color: W.accent,
+          fontSize: W.fontSm,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          cursor: 'pointer',
+        }}
+        title="Prepend /task to route through the full pipeline"
+      >
+        use /task
+      </button>
     </div>
   );
 }

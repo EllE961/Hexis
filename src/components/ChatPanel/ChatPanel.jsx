@@ -949,9 +949,28 @@ function ThinkingDots() {
 // ─── Empty state ───
 
 function EmptyState() {
+  // Starter prompt suggestions — tiny buttons under the hero that
+  // pre-fill the textarea. Helps a fresh user get to "something
+  // useful happens" in one click instead of typing from scratch.
+  const suggestions = [
+    'what does this codebase do?',
+    'show me the main entry point',
+    'list the TODOs in src/',
+  ];
+  const fill = (text) => {
+    // Fire a keyboard-ish event the textarea will pick up. Simpler:
+    // find the textarea and set its value.
+    const ta = document.querySelector('textarea[placeholder*="Ask anything"]');
+    if (!ta) return;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, text);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.focus();
+  };
+
   return (
     <div style={{
-      marginTop: '15%',
+      marginTop: '12%',
       textAlign: 'center',
       color: W.textMuted,
       fontSize: W.fontLg,
@@ -961,23 +980,84 @@ function EmptyState() {
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        width: 56,
-        height: 56,
+        width: 72,
+        height: 72,
         borderRadius: W.radius3,
         background: W.accentBg,
         border: `1px solid ${W.borderHi}`,
         color: W.accent,
         marginBottom: W.s3,
+        boxShadow: `0 0 40px rgba(240, 160, 48, 0.15)`,
       }}>
         <Icon name="comment-discussion" size={W.iconXl} color="inherit" />
       </div>
-      <div style={{ fontWeight: W.fontWeightSemi, color: W.text, marginBottom: W.s2, fontSize: W.fontXl }}>
+      <div style={{
+        fontWeight: W.fontWeightSemi,
+        color: W.text,
+        marginBottom: W.s2,
+        fontSize: W.fontXxl || 22,
+      }}>
         Chat with Hexis
       </div>
-      <div style={{ fontSize: W.fontMd, lineHeight: 1.5, maxWidth: 420, margin: '0 auto' }}>
-        Direct conversational agent with full tool access — memory, skills,
-        file edits, tests, git. Same Claude you'd get in the CLI, wired into
-        your repo. Type a message below and press <strong style={{ color: W.textDim }}>Enter</strong> to send.
+      <div style={{
+        fontSize: W.fontMd,
+        lineHeight: 1.55,
+        maxWidth: 460,
+        margin: '0 auto',
+        marginBottom: W.s4,
+      }}>
+        Claude Code directly, inside your IDE. Memory, skills, file edits,
+        tests, git — with a one-click escalation to the full multi-agent
+        review pipeline when quality matters. Press{' '}
+        <kbd style={{
+          padding: '1px 6px',
+          border: `1px solid ${W.border}`,
+          borderRadius: 3,
+          fontSize: 11,
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          color: W.textDim,
+        }}>Ctrl</kbd>
+        {' + '}
+        <kbd style={{
+          padding: '1px 6px',
+          border: `1px solid ${W.border}`,
+          borderRadius: 3,
+          fontSize: 11,
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          color: W.textDim,
+        }}>/</kbd>
+        {' anywhere in Hexis to jump back here.'}
+      </div>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: W.s2,
+        maxWidth: 420,
+        margin: '0 auto',
+      }}>
+        {suggestions.map((s, i) => (
+          <button
+            key={i}
+            onClick={() => fill(s)}
+            style={{
+              padding: `${W.s2}px ${W.s3}px`,
+              background: W.bg2,
+              border: `1px solid ${W.border}`,
+              borderRadius: W.radius1,
+              color: W.text,
+              fontSize: W.fontMd,
+              fontFamily: W.fontFamily,
+              cursor: 'pointer',
+              textAlign: 'left',
+              transition: `all ${W.animFast}`,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = W.accent; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = W.border; }}
+          >
+            <span style={{ color: W.accent, marginRight: W.s2 }}>→</span>
+            {s}
+          </button>
+        ))}
       </div>
     </div>
   );

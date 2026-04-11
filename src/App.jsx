@@ -8,6 +8,7 @@ import LocalHistoryPanel from './components/panels/LocalHistoryPanel.jsx';
 import GitPanel from './components/GitPanel/GitPanel.jsx';
 import AIPanel from './components/AIPanel/AIPanel.jsx';
 import ChatPanel from './components/ChatPanel/ChatPanel.jsx';
+import MemoryPanel from './components/MemoryPanel/MemoryPanel.jsx';
 import HistoryTimeline from './components/Timeline/HistoryTimeline.jsx';
 import TerminalPanel from './components/Terminal/TerminalPanel.jsx';
 import CommandPalette from './components/CommandPalette/CommandPalette.jsx';
@@ -405,6 +406,7 @@ export default function App() {
       case 'view:ai':              togglePanel('ai'); break;
       case 'view:chat':            togglePanel('chat'); break;
       case 'view:bookmarks':       togglePanel('bookmarks'); break;
+      case 'view:memory':          togglePanel('memory'); break;
       case 'view:history':         togglePanel('history'); break;
       case 'view:terminal':        togglePanel('terminal'); break;
       case 'view:timeline':        togglePanel('timeline'); break;
@@ -572,6 +574,7 @@ export default function App() {
         { id: 'view:chat', label: 'Chat', shortcut: 'Ctrl+Shift+C', mnemonic: 'C', checked: panels.chat?.visible },
         { id: 'view:ai', label: 'AI Agents', shortcut: 'Ctrl+I', mnemonic: 'A', checked: panels.ai?.visible },
         { id: 'view:bookmarks', label: 'Bookmarks', mnemonic: 'B', checked: panels.bookmarks?.visible },
+        { id: 'view:memory', label: 'Memory (learned conventions)', mnemonic: 'M', checked: panels.memory?.visible },
         { id: 'view:history', label: 'Local History', mnemonic: 'H', checked: panels.history?.visible },
         { id: 'view:terminal', label: 'Terminal', shortcut: 'Ctrl+`', mnemonic: 'T', checked: panels.terminal?.visible },
         { id: 'view:timeline', label: 'Git Timeline', shortcut: 'Ctrl+T', mnemonic: 'i', checked: panels.timeline?.visible },
@@ -1765,6 +1768,7 @@ export default function App() {
           <DockPanel key="search" id="search" title="Search" icon={<Icon name="search" />}><SearchPanel /></DockPanel>,
           <DockPanel key="bookmarks" id="bookmarks" title="Bookmarks" icon={<Icon name="bookmark" />}><BookmarksPanel /></DockPanel>,
           <DockPanel key="history" id="history" title="Local History" icon={<Icon name="history" />}><LocalHistoryPanel /></DockPanel>,
+          <DockPanel key="memory" id="memory" title="Memory" icon={<Icon name="lightbulb" />}><MemoryPanel /></DockPanel>,
           <DockPanel key="editor" id="editor" title="Editor" icon={<Icon name="file-code" />}>
             <EditorPanel
               explorer={

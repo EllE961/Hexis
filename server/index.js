@@ -1042,6 +1042,28 @@ app.get('/api/workspace', (_req, res) => {
   res.json({ path: REPO_PATH });
 });
 
+// Returns the raw contents of .hexis/memories/learned.md for the memory
+// side panel. Every Final Reviewer appends to this file, so it's the
+// compounding-quality loop made visible. Returns an empty string (not
+// 404) when the file doesn't exist so the UI can show an empty state.
+app.get('/api/memory/learned', async (_req, res) => {
+  try {
+    const path = resolve(REPO_PATH, '.hexis', 'memories', 'learned.md');
+    try {
+      const content = await readFile(path, 'utf-8');
+      res.json({ path: '.hexis/memories/learned.md', content, exists: true });
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        res.json({ path: '.hexis/memories/learned.md', content: '', exists: false });
+      } else {
+        throw err;
+      }
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── SSE ───
 
 app.get('/events', (req, res) => {

@@ -34,6 +34,11 @@ const DEFAULTS = {
   terminal:  { mode: 'docked', dock: 'bottom', width: null, height: 260, x: 0, y: 0, visible: false, zIndex: 30, order: 0, minWidth: 300, minHeight: 120, maximized: false, preMaxState: null, edgeCollapsed: false },
   timeline:  { mode: 'docked', dock: 'bottom', width: null, height: 80,  x: 0, y: 0, visible: false, zIndex: 30, order: 1, minWidth: 300, minHeight: 60,  maximized: false, preMaxState: null, edgeCollapsed: false },
   taskboard: { mode: 'floating', dock: null,   width: 1050, height: 650, x: 'center', y: 'center', visible: false, zIndex: 30, order: 0, minWidth: 600, minHeight: 400, maximized: false, preMaxState: null, edgeCollapsed: false },
+  // Memory: shows .hexis/memories/learned.md — the compounding
+  // quality loop. Every Final Reviewer appends conventions to it,
+  // every future Planner run prepends them. This panel makes that
+  // invisible advantage visible.
+  memory:    { mode: 'docked', dock: 'right',  width: 420, height: null, x: 0, y: 0, visible: false, zIndex: 30, order: 5, minWidth: 300, minHeight: 200, maximized: false, preMaxState: null, edgeCollapsed: false },
 };
 
 // Load + unwrap the persisted layout. Handles three cases:

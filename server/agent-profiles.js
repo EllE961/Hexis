@@ -82,6 +82,11 @@ export const PROFILES = {
     model: 'sonnet',
     effort: 'high',
     maxTurns: 40,                   // enough for a single turn's tool chain
+    // Skip the per-turn Serena MCP subprocess spawn (~2-5 s cold start).
+    // Chat is a conversational loop — users expect Claude-Code-CLI-grade
+    // latency, and Glob/Grep/Read cover the 80% case for Q&A and small
+    // edits. Agent tasks still get Serena via their own profiles.
+    lightweight: true,
   },
   chat_opus: {
     model: 'opus',
@@ -89,6 +94,7 @@ export const PROFILES = {
     maxTurns: 40,
     thinking: { type: 'adaptive' },
     fallbackModel: 'sonnet',
+    lightweight: true,              // same reason as `chat` above
   },
 
   // ─── Deep Research pipeline roles ───

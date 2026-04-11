@@ -16,7 +16,7 @@ import {
   amendCommit, revertCommit, resetTo, fetchRemote,
 } from './git-analyzer.js';
 import { startWatcher } from './watcher.js';
-import { startTask, cancelTask, approveTask, writeTask, resumeTaskFn, researchTask, chatMessage, cancelChat, disposeChat } from './agent-orchestrator.js';
+import { startTask, cancelTask, approveTask, writeTask, resumeTaskFn, researchTask, chatMessage, cancelChat, disposeChat, warmupSdk } from './agent-orchestrator.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { initStateStore, getStateStore } from './state-store.js';
 import { initRepoContext } from './repo-context.js';
@@ -39,6 +39,10 @@ console.log(`  ✦ State loaded: ${stateStore.getTasks().length} tasks, ${stateS
 
 // Initialize repo context (AGENTS.md, repo wiki, cached preamble for agents)
 await initRepoContext(REPO_PATH);
+
+// Fire-and-forget SDK warmup — kills first-turn cold start on chat mode.
+// Runs in the background, doesn't block listen(). See agent-orchestrator.warmupSdk.
+warmupSdk(REPO_PATH).catch(() => {});
 
 // SSE clients
 const sseClients = new Set();

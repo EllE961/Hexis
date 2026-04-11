@@ -1648,6 +1648,23 @@ export default function App() {
           togglePanel('editor');
         }
       }
+      // Ctrl+/: focus the chat input from anywhere. The "wherever I am,
+      // put my cursor in the chat input NOW" shortcut. Works even inside
+      // CodeMirror — the whole point is an always-available chat prompt.
+      // Does NOT work if a form INPUT is focused (user is mid-typing
+      // elsewhere) to avoid surprising them.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === '/') {
+        const inputFocused = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
+        if (!inputFocused) {
+          e.preventDefault();
+          // Ensure the chat panel is visible, then fire the focus event
+          usePanelStore.getState().showPanel('chat');
+          // Defer to next tick so ChatPanel has rendered if it was hidden
+          setTimeout(() => {
+            window.dispatchEvent(new Event('hexis:focus-chat'));
+          }, 0);
+        }
+      }
       // Ctrl+O: open folder (native picker) — only when the editor isn't focused
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'o' || e.key === 'O')) {
         const editorFocused = document.activeElement?.closest?.('.cm-editor');

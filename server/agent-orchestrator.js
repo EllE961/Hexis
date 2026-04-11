@@ -783,7 +783,9 @@ export async function chatMessage(chatId, userMessage, repoPath, broadcast, opts
       tools: CODER_TOOLS,
       permissionMode: 'bypassPermissions',
       resume: resumeSessionId || undefined,
-      // Sonnet by default, Opus on request
+      // Sonnet by default, Opus on request. `profile` also carries
+      // `lightweight: true` so runAgent skips the per-turn Serena
+      // subprocess spawn (2-5 s saved on every chat turn).
       ...profile,
     }, task, taggedBroadcast, agentId);
 
@@ -837,6 +839,50 @@ export function cancelChat(chatId) {
 export function disposeChat(chatId) {
   cancelChat(chatId);
   chatTasks.delete(chatId);
+}
+
+/**
+ * Warm up the Claude Agent SDK on server boot so the first real chat
+ * turn doesn't eat the cold-start penalty (module loading, MCP shim
+ * resolution, auth handshake). Fires a single minimal Haiku query in
+ * the background and swallows any errors — pure perf optimization.
+ *
+ * Should be called once from server/index.js after initRepoContext,
+ * without awaiting (so it doesn't block the listen()).
+ */
+export async function warmupSdk(repoPath) {
+  const dummyTask = {
+    aborted: false,
+    sessions: [],
+    approvalResolve: null,
+    worktreePath: null,
+    diffTracker: createDiffTracker(),
+  };
+  const swallow = () => {};
+  try {
+    // Race the warmup against a 6 s timeout — the warmup should take
+    // ~1-2 s, but if auth is borked or the network is slow, we don't
+    // want a hanging background promise keeping the process busy.
+    const warmup = runAgent({
+      prompt: 'ok',
+      cwd: repoPath,
+      systemPrompt: '',
+      tools: NO_TOOLS,
+      permissionMode: 'plan',
+      model: 'haiku',
+      effort: 'low',
+      maxTurns: 1,
+      lightweight: true,
+      silent: true,
+    }, dummyTask, swallow, 'warmup');
+
+    const timeout = new Promise((resolve) => setTimeout(resolve, 6000));
+    await Promise.race([warmup, timeout]);
+    console.log('[warmup] SDK prewarm done');
+  } catch (err) {
+    // Swallow — this is a best-effort optimization, not a critical path
+    console.log('[warmup] SDK prewarm skipped:', err?.message || err);
+  }
 }
 
 // ─── SDK query helper ───

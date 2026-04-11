@@ -62,6 +62,36 @@ export default function ChatPanel() {
     ta.style.height = Math.min(ta.scrollHeight, 240) + 'px';
   }, [input]);
 
+  // Autofocus the textarea on mount and whenever the active chat changes,
+  // so "open Hexis → start typing" works without a mouse click. Guard
+  // against stealing focus from modals, the editor, or another text input.
+  useEffect(() => {
+    const shouldFocus = () => {
+      const active = document.activeElement;
+      if (!active || active === document.body) return true;
+      // Never steal focus from a focused input / editor / modal button
+      const tag = active.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return false;
+      if (active.closest?.('.cm-editor')) return false;
+      if (active.closest?.('[role="dialog"]')) return false;
+      return true;
+    };
+    if (shouldFocus()) {
+      // Slight delay so React has committed the layout before we focus
+      const t = setTimeout(() => textareaRef.current?.focus(), 0);
+      return () => clearTimeout(t);
+    }
+  }, [activeId]);
+
+  // Listen for global `hexis:focus-chat` events (fired by Ctrl+/ from
+  // anywhere in the app). Unconditionally focuses — unlike the mount
+  // effect, the user explicitly asked for it.
+  useEffect(() => {
+    const onFocus = () => textareaRef.current?.focus();
+    window.addEventListener('hexis:focus-chat', onFocus);
+    return () => window.removeEventListener('hexis:focus-chat', onFocus);
+  }, []);
+
   const handleSubmit = (e) => {
     e?.preventDefault?.();
     if (!input.trim() || sending) return;
@@ -451,6 +481,7 @@ export default function ChatPanel() {
 
 function Message({ role, content, tokens, cost, streaming }) {
   const isUser = role === 'user';
+  const isEmptyStreaming = streaming && !content;
   return (
     <div style={{
       margin: `${W.s3}px 0`,
@@ -469,9 +500,14 @@ function Message({ role, content, tokens, cost, streaming }) {
         <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: W.fontWeightSemi }}>
           {isUser ? 'You' : 'Assistant'}
         </span>
-        {streaming && (
+        {streaming && !isEmptyStreaming && (
           <span style={{ color: W.accent }}>
             ● streaming
+          </span>
+        )}
+        {isEmptyStreaming && (
+          <span style={{ color: W.accent, opacity: 0.8 }}>
+            thinking…
           </span>
         )}
         {!streaming && tokens > 0 && (
@@ -490,10 +526,38 @@ function Message({ role, content, tokens, cost, streaming }) {
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
         fontFamily: isUser ? W.fontFamily : W.fontFamily,
+        minHeight: isEmptyStreaming ? 28 : undefined,
       }}>
-        {content || (streaming ? <span style={{ opacity: 0.5 }}>…</span> : '')}
+        {content || (isEmptyStreaming ? <ThinkingDots /> : '')}
       </div>
     </div>
+  );
+}
+
+// Animated three-dot pulse, rendered while the agent is working but
+// hasn't produced any tokens yet. Kills the "did it work?" dead gap.
+function ThinkingDots() {
+  const dotStyle = (delay) => ({
+    display: 'inline-block',
+    width: 6,
+    height: 6,
+    borderRadius: '50%',
+    background: W.accent,
+    margin: '0 2px',
+    animation: `hexis-thinking-pulse 1.1s ${delay}s ease-in-out infinite`,
+  });
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', opacity: 0.85, verticalAlign: 'middle' }}>
+      <style>{`
+        @keyframes hexis-thinking-pulse {
+          0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+          40%           { transform: scale(1.0); opacity: 1.0; }
+        }
+      `}</style>
+      <span style={dotStyle(0)} />
+      <span style={dotStyle(0.15)} />
+      <span style={dotStyle(0.3)} />
+    </span>
   );
 }
 

@@ -83,11 +83,38 @@ function saveChats(chats, activeId) {
           cachedNew: m.cachedNew,
           cost: m.cost,
           fileChanges: m.fileChanges,
+          mentions: m.mentions,
+          isHandoff: m.isHandoff,
         })),
       };
     }
     localStorage.setItem(storageKey(currentScope), JSON.stringify({ chats: slim, activeId }));
   } catch { /* ignore */ }
+}
+
+// Pull `@path/to/file.ext` tokens out of chat text. Respects fenced
+// code blocks (don't expand @ inside ```…```). Returns deduped list
+// in the order they appear in the text.
+export function extractMentions(text) {
+  if (!text) return [];
+  // Strip fenced code blocks first so we don't expand e.g. `@media`
+  // inside a CSS sample.
+  const stripped = text.replace(/```[\s\S]*?```/g, '');
+  // Match @ followed by path-like chars. Allows slashes, dots,
+  // dashes, underscores, alphanumerics. Stops at whitespace or
+  // punctuation that can't appear in a path.
+  const re = /(?:^|[\s(])@([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g;
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(stripped)) !== null) {
+    const p = m[1];
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 function newChat(id, title) {
@@ -302,6 +329,113 @@ export const useChatStore = create((set, get) => ({
       });
       return;
     }
+    if (/^\/compact(?:\s|$)/i.test(text)) {
+      // Summarize all but the most recent 2 turns (4 messages) into
+      // a single "earlier conversation" block, then reset the session
+      // so the next turn starts fresh. Keeps context, frees tokens.
+      const allMessages = chat.messages || [];
+      const keepFromIdx = Math.max(0, allMessages.length - 4);
+      const toSummarize = allMessages.slice(0, keepFromIdx).filter(m => !m.isHandoff);
+      const keptTail = allMessages.slice(keepFromIdx);
+
+      if (toSummarize.length < 2) {
+        // Nothing meaningful to compact
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = {
+            ...c,
+            messages: [
+              ...c.messages,
+              { role: 'user', content: text, ts: Date.now() },
+              {
+                role: 'assistant',
+                content: 'Nothing to compact yet — need at least 2 earlier turns. Keep chatting and try `/compact` again when the history grows.',
+                ts: Date.now(),
+                isHandoff: true,
+              },
+            ],
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+        return;
+      }
+
+      // Mark sending so the UI shows a progress indicator
+      set(state => {
+        const chats = { ...state.chats };
+        const c = chats[chatId];
+        if (!c) return state;
+        chats[chatId] = {
+          ...c,
+          messages: [...c.messages, { role: 'user', content: text, ts: Date.now() }],
+          sending: true,
+          streamBuffer: '',
+          error: null,
+        };
+        saveChats(chats, state.activeId);
+        return { chats };
+      });
+
+      try {
+        const res = await fetch('/api/chat/compact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            turns: toSummarize.map(m => ({ role: m.role, content: m.content })),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+
+        // Replace the older messages with a single summary entry +
+        // reset sessionId so the next real turn starts fresh from
+        // the summary (not from the old full transcript).
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          const summaryMsg = {
+            role: 'assistant',
+            content: `**Earlier conversation (compacted, ${toSummarize.length} turns):**\n\n${data.summary}`,
+            ts: Date.now(),
+            isHandoff: true,
+          };
+          chats[chatId] = {
+            ...c,
+            sessionId: null,
+            messages: [
+              summaryMsg,
+              ...keptTail,
+              {
+                role: 'assistant',
+                content: `Compacted ${toSummarize.length} earlier turns into a summary. Session reset — next turn starts with a fresh cache.`,
+                ts: Date.now(),
+                isHandoff: true,
+              },
+            ],
+            sending: false,
+            streamBuffer: '',
+            error: null,
+          };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      } catch (err) {
+        set(state => {
+          const chats = { ...state.chats };
+          const c = chats[chatId];
+          if (!c) return state;
+          chats[chatId] = { ...c, sending: false, error: err.message || String(err) };
+          saveChats(chats, state.activeId);
+          return { chats };
+        });
+      }
+      return;
+    }
+
     const modelMatch = /^\/model\s+(sonnet|opus)\b/i.exec(text);
     if (modelMatch) {
       const newModel = modelMatch[1].toLowerCase();
@@ -392,8 +526,106 @@ export const useChatStore = create((set, get) => ({
       return;
     }
 
-    // Push user message + mark chat as sending
-    const userMsg = { role: 'user', content: text, ts: Date.now() };
+    // Auto-inject editor + git context as a compact header block.
+    // - Active editor file: the single path the user is currently
+    //   looking at. Agent doesn't need the full content unless it
+    //   was @-mentioned — just knowing which file is "in view" is
+    //   enough to bias intent classification ("this is probably
+    //   about that file").
+    // - Recently changed files: the top 5 from git working tree.
+    //   Keeps the agent aware of in-flight changes so its
+    //   recommendations don't conflict.
+    //
+    // This only fires on the FIRST turn of each session (when
+    // sessionId is null) — the cached preamble carries it forward
+    // across subsequent turns at near-zero token cost.
+    let contextHeader = '';
+    if (!chat.sessionId) {
+      try {
+        const { useEditorStore } = await import('./editorStore.js');
+        const { useGitStore } = await import('./gitStore.js');
+        const editor = useEditorStore.getState();
+        const git = useGitStore.getState();
+        const parts = [];
+        if (editor.activeTab) {
+          parts.push(`**Currently viewing**: \`${editor.activeTab}\``);
+        }
+        const changed = [
+          ...(git.staged || []),
+          ...(git.modified || []),
+          ...(git.untracked || []),
+        ].slice(0, 5);
+        if (changed.length > 0) {
+          parts.push(`**Recently changed** (uncommitted): ${changed.map(f => `\`${f}\``).join(', ')}`);
+        }
+        if (parts.length > 0) {
+          contextHeader =
+            `[session context — auto-injected once per session, don't re-fetch these]\n` +
+            parts.join('\n') + '\n\n---\n\n';
+        }
+      } catch {}
+    }
+
+    // Detect @file mentions and expand them to real content.
+    // Walk the raw text for `@path/to/file.ext` tokens, fetch each
+    // file's content from the server, and prepend the resolved
+    // bodies as a context block. This saves the agent a Read()
+    // tool round-trip and makes @ references actually useful.
+    //
+    // Rules:
+    //   - Max 6 mentions per turn (don't blow out the context)
+    //   - Each file truncated to 400 lines / 32 KB (whichever smaller)
+    //   - Files not found silently skipped
+    //   - The original text is still sent; context block just
+    //     prepends it. The user still sees their message verbatim
+    //     in the chat log.
+    const mentionedPaths = extractMentions(text);
+    let augmentedPrompt = contextHeader + text;
+    const resolvedMentions = [];
+    if (mentionedPaths.length > 0) {
+      const toFetch = mentionedPaths.slice(0, 6);
+      const results = await Promise.all(
+        toFetch.map(p =>
+          fetch(`/api/file?path=${encodeURIComponent(p)}`)
+            .then(r => r.ok ? r.json() : null)
+            .catch(() => null)
+        )
+      );
+      const blocks = [];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (!r || !r.content) continue;
+        // Truncate large files — 32 KB + 400 lines hard cap
+        let body = r.content;
+        const lines = body.split('\n');
+        if (lines.length > 400) {
+          body = lines.slice(0, 400).join('\n') +
+                 `\n\n[… ${lines.length - 400} more lines truncated]`;
+        }
+        if (body.length > 32_768) {
+          body = body.slice(0, 32_768) + '\n\n[… truncated at 32 KB]';
+        }
+        blocks.push(`### @${r.path}\n\`\`\`\n${body}\n\`\`\``);
+        resolvedMentions.push(r.path);
+      }
+      if (blocks.length > 0) {
+        augmentedPrompt =
+          contextHeader +
+          `The user is referencing these files. Their contents are included inline — do NOT re-read them unless you need to see changes made during this turn.\n\n` +
+          blocks.join('\n\n') +
+          `\n\n---\n\n${text}`;
+      }
+    }
+
+    // Push user message + mark chat as sending. The user sees their
+    // original message (with `@` syntax preserved); the augmented
+    // prompt is only sent to the agent.
+    const userMsg = {
+      role: 'user',
+      content: text,
+      ts: Date.now(),
+      mentions: resolvedMentions,
+    };
     set(state => {
       const chats = { ...state.chats };
       chats[chatId] = {
@@ -420,7 +652,11 @@ export const useChatStore = create((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chatId,
-          message: text,
+          // Send the augmented prompt (with @file expansions) to the
+          // agent, not the bare text. The user still sees their
+          // original text in the chat history — augmentedPrompt is
+          // purely a server-side context injection.
+          message: augmentedPrompt,
           sessionId: chat.sessionId || null,
           model: chat.model || 'sonnet',
         }),

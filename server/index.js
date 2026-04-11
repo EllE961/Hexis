@@ -1064,6 +1064,90 @@ app.get('/api/memory/learned', async (_req, res) => {
   }
 });
 
+// Append a rule to .hexis/memories/learned.md. Used by the chat
+// "star to memory" button and future programmatic memory ops.
+// Body: { rule: string, source?: 'chat' | 'user' | 'task' }
+app.post('/api/memory/learned', async (req, res) => {
+  const { rule, source } = req.body || {};
+  if (!rule || typeof rule !== 'string' || !rule.trim()) {
+    return res.status(400).json({ error: 'rule required' });
+  }
+  try {
+    const { mkdir, readFile, writeFile } = await import('fs/promises');
+    const dir = resolve(REPO_PATH, '.hexis', 'memories');
+    await mkdir(dir, { recursive: true });
+    const path = resolve(dir, 'learned.md');
+    let existing = '';
+    try { existing = await readFile(path, 'utf-8'); } catch {}
+    const stamp = new Date().toISOString().slice(0, 10);
+    const tag = source === 'chat' ? 'chat' : source === 'task' ? 'task' : 'user';
+    const entry = `- ${rule.trim()} _(${tag}, ${stamp})_\n`;
+    // Find or create a `## Learned` section (canonical header)
+    let next;
+    if (/^##\s+Learned\b/mi.test(existing)) {
+      next = existing.replace(/^(##\s+Learned[^\n]*\n+)/mi, `$1${entry}`);
+    } else {
+      const header = existing.trim() ? '\n\n' : '';
+      next = existing + header + `## Learned\n\n${entry}`;
+    }
+    await writeFile(path, next, 'utf-8');
+    res.json({ ok: true, entry: entry.trim() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Compact an array of chat turns into a one-paragraph summary via
+// Haiku. Body: { turns: [{role, content}, ...] }. Returns
+// { summary: string }. Used by /compact in the chat panel to
+// preserve context while freeing tokens for long sessions.
+app.post('/api/chat/compact', async (req, res) => {
+  const { turns } = req.body || {};
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return res.status(400).json({ error: 'turns required' });
+  }
+  try {
+    // Format turns as a plain transcript for the summarizer
+    const transcript = turns
+      .map(t => `${t.role === 'user' ? 'USER' : 'ASSISTANT'}: ${(t.content || '').slice(0, 2000)}`)
+      .join('\n\n');
+    const summarizerPrompt = `Summarize this chat conversation into a compact paragraph (under 400 words) that preserves the key context, decisions made, files touched, and any unresolved questions. Write in third person as if briefing a new assistant joining the conversation. Focus on facts, not pleasantries.
+
+---
+
+${transcript}
+
+---
+
+Write only the summary paragraph — no preamble, no "Here's the summary".`;
+
+    // Reuse the SDK query directly — Haiku, no tools, one turn
+    const stream = query({
+      prompt: summarizerPrompt,
+      options: {
+        cwd: REPO_PATH,
+        model: 'haiku',
+        effort: 'low',
+        allowedTools: [],
+        permissionMode: 'plan',
+        maxTurns: 1,
+        settingSources: [],
+      },
+    });
+    let summary = '';
+    for await (const message of stream) {
+      if (message.type === 'assistant' && message.message?.content) {
+        for (const block of message.message.content) {
+          if (block.type === 'text') summary += block.text;
+        }
+      }
+    }
+    res.json({ summary: summary.trim() || '[summarizer returned empty]' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── SSE ───
 
 app.get('/events', (req, res) => {

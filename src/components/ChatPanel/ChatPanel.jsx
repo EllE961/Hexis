@@ -625,6 +625,7 @@ export default function ChatPanel() {
               cost={m.cost}
               fileChanges={m.fileChanges}
               isHandoff={m.isHandoff}
+              mentions={m.mentions}
               // The Deep review button re-submits the PRECEDING user
               // prompt through the full agent pipeline. Only show it
               // on non-handoff assistant messages where the previous
@@ -793,7 +794,7 @@ export default function ChatPanel() {
 
 // ─── Message bubble ───
 
-function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff }) {
+function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, cost, streaming, fileChanges, priorUserMessage, isHandoff, mentions }) {
   const isUser = role === 'user';
   const isEmptyStreaming = streaming && !content;
   return (
@@ -864,6 +865,35 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
           <AssistantBlocks content={content} />
         )}
       </div>
+      {/* Mentions row on user messages — shows which @file references
+          got expanded + injected as context for the turn. */}
+      {isUser && mentions?.length > 0 && (
+        <div style={{
+          marginTop: W.s1,
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: W.s1,
+          alignItems: 'center',
+          maxWidth: '85%',
+        }}>
+          <span style={{ fontSize: W.fontSm, color: W.textMuted, marginRight: W.s2 }}>
+            referenced
+          </span>
+          {mentions.map((f, i) => (
+            <span key={i} style={{
+              padding: `2px ${W.s2}px`,
+              background: 'rgba(88, 166, 255, 0.08)',
+              border: `1px solid rgba(88, 166, 255, 0.35)`,
+              borderRadius: W.radius1,
+              fontSize: W.fontSm,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              color: '#58a6ff',
+            }}>
+              @{f}
+            </span>
+          ))}
+        </div>
+      )}
       {/* File-changes row — lists every file the agent edited this
           turn as a compact pill below the message bubble. Only for
           assistant messages that actually touched files. */}
@@ -894,6 +924,8 @@ function Message({ role, content, ts, tokens, tokensIn, tokensOut, cachedRead, c
 
 function MessageActions({ isUser, content, priorUserMessage }) {
   const [copied, setCopied] = useState(false);
+  const [starState, setStarState] = useState('idle'); // idle | input | saving | saved
+  const [starText, setStarText] = useState('');
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(content || '');
@@ -903,24 +935,112 @@ function MessageActions({ isUser, content, priorUserMessage }) {
   };
   const handleRegenerate = async () => {
     if (!priorUserMessage) return;
-    // Reuse the store's sendMessage — it will append a new user msg
-    // and run the turn fresh. We deliberately do NOT try to edit the
-    // previous response in place; keeping history linear is simpler
-    // and matches claude.ai.
     const { useChatStore } = await import('../../stores/chatStore.js');
     useChatStore.getState().sendMessage(priorUserMessage);
   };
+  const openStar = () => {
+    // Pre-fill with the first sentence of the message (up to 140 chars)
+    const first = (content || '').split(/[.!?]\s/)[0].trim().slice(0, 140);
+    setStarText(first);
+    setStarState('input');
+  };
+  const submitStar = async () => {
+    const rule = starText.trim();
+    if (!rule) return;
+    setStarState('saving');
+    try {
+      const res = await fetch('/api/memory/learned', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rule, source: 'chat' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setStarState('saved');
+      setTimeout(() => setStarState('idle'), 1800);
+    } catch {
+      setStarState('idle');
+    }
+  };
+
+  if (starState === 'input' || starState === 'saving') {
+    return (
+      <div style={{
+        marginTop: 2,
+        display: 'flex',
+        gap: W.s1,
+        alignItems: 'center',
+        maxWidth: '85%',
+        flexWrap: 'wrap',
+      }}>
+        <input
+          autoFocus
+          value={starText}
+          onChange={(e) => setStarText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); submitStar(); }
+            if (e.key === 'Escape') { e.preventDefault(); setStarState('idle'); }
+          }}
+          placeholder="One-line rule to save to memory…"
+          disabled={starState === 'saving'}
+          style={{
+            flex: 1,
+            minWidth: 240,
+            padding: `${W.s1}px ${W.s2}px`,
+            background: W.bg1,
+            border: `1px solid ${W.accent}`,
+            borderRadius: W.radius1,
+            color: W.text,
+            fontSize: W.fontSm,
+            fontFamily: W.fontFamily,
+            outline: 'none',
+          }}
+        />
+        <button
+          onClick={submitStar}
+          disabled={starState === 'saving'}
+          style={{
+            padding: `2px ${W.s2}px`,
+            background: W.accentBg,
+            border: `1px solid ${W.accent}`,
+            borderRadius: W.radius1,
+            color: W.accent,
+            fontSize: 11,
+            cursor: 'pointer',
+            fontFamily: W.fontFamily,
+          }}
+        >
+          {starState === 'saving' ? 'saving…' : 'save'}
+        </button>
+        <button
+          onClick={() => setStarState('idle')}
+          style={{
+            padding: `2px ${W.s2}px`,
+            background: 'transparent',
+            border: `1px solid ${W.border}`,
+            borderRadius: W.radius1,
+            color: W.textDim,
+            fontSize: 11,
+            cursor: 'pointer',
+            fontFamily: W.fontFamily,
+          }}
+        >
+          cancel
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={{
       marginTop: 2,
       display: 'flex',
       gap: W.s1,
       alignItems: 'center',
-      opacity: 0.55,
+      opacity: starState === 'saved' ? 1 : 0.55,
       transition: `opacity ${W.animFast}`,
     }}
       onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
-      onMouseLeave={(e) => { e.currentTarget.style.opacity = 0.55; }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = starState === 'saved' ? 1 : 0.55; }}
     >
       <button
         onClick={handleCopy}
@@ -954,6 +1074,24 @@ function MessageActions({ isUser, content, priorUserMessage }) {
           }}
         >
           ↻ regenerate
+        </button>
+      )}
+      {!isUser && (
+        <button
+          onClick={openStar}
+          title="Save a rule from this message to project memory (learned.md)"
+          style={{
+            padding: '2px 8px',
+            background: 'transparent',
+            border: `1px solid ${starState === 'saved' ? W.accent : W.border}`,
+            borderRadius: W.radius1,
+            color: starState === 'saved' ? W.accent : W.textDim,
+            fontSize: 11,
+            cursor: 'pointer',
+            fontFamily: W.fontFamily,
+          }}
+        >
+          {starState === 'saved' ? '★ saved' : '★ memory'}
         </button>
       )}
     </div>
@@ -1177,6 +1315,7 @@ function Block({ block }) {
 const SLASH_HINTS = [
   { cmd: '/research', desc: 'deep 6-phase research pipeline' },
   { cmd: '/task',     desc: 'full agent pipeline with Critic review' },
+  { cmd: '/compact',  desc: 'summarize older turns to free context' },
   { cmd: '/clear',    desc: 'wipe this chat and start fresh' },
   { cmd: '/model',    desc: 'switch model (sonnet | opus)' },
   { cmd: '/help',     desc: 'show all commands and shortcuts' },

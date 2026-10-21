@@ -207,7 +207,7 @@ doesn't ship yet.
 - `allowedTools` for the role and a `permissionMode` (`plan` for read-only roles, `bypassPermissions` for writers);
 - an environment copy without `ANTHROPIC_API_KEY`, so the bundled Claude Code CLI uses the machine's Claude Code login;
 - `settingSources` of `project` for lightweight roles and `user`, `project`, `local` for the rest, so project `CLAUDE.md` and `.claude/` settings apply;
-- an in-process MCP server (`hexis-mcp-tools.js`) and, unless the role is lightweight or `HEXIS_DISABLE_SERENA=1`, Serena over stdio through `uvx`;
+- an in-process MCP server (`hexis-mcp-tools.js`) and, unless the role is lightweight or `HEXIS_DISABLE_SERENA=1`, Serena over stdio through `uvx`, pinned to the commit behind its v2.1.0 tag;
 - hooks from `agent-hooks.js` (not for lightweight roles): PreToolUse refuses Write, Edit, MultiEdit and NotebookEdit on lockfiles, `.env*`, `tauri.conf.json`, `node_modules` and `.git`; PostToolUse records each edit and broadcasts it; SessionStart injects `git log -5` for up to ten focus files;
 - the `claude_code` system prompt preset with an appended preamble (shared consistency rules, `AGENTS.md` or `CLAUDE.md` capped at 8 KB, the cached repo summary and `learned.md` capped at 4 KB) and dynamic sections excluded, so parallel runs share a prompt-cache prefix;
 - `outputFormat: { type: 'json_schema' }` when the role returns structured data.
@@ -286,10 +286,11 @@ through Algolia, and the npm registry.
 
 ### Start-up calls
 
-When the server starts it fires a one-turn "ping" with the chat profile so the first real chat turn doesn't pay the
-SDK's cold start (it gives up waiting after 8 seconds). `initRepoContext()` loads `AGENTS.md` or `CLAUDE.md` and
-`learned.md`, and if `~/.hexis/wiki-<hash>.json` doesn't match the current HEAD it runs a Sonnet agent with Read,
-Glob and Grep (up to 25 turns) in the background to write a repo summary for the preamble.
+`initRepoContext()` loads `AGENTS.md` or `CLAUDE.md`, `learned.md` and the cached repo summary for the current HEAD
+if `~/.hexis/wiki-<hash>.json` has one. Nothing else talks to a model at startup unless `HEXIS_BACKGROUND_AGENTS=1`
+is set. With it, the server fires a one-turn "ping" with the chat profile so the first real chat turn doesn't pay the
+SDK's cold start (it gives up waiting after 8 seconds), and when the summary is missing it runs a Sonnet agent with
+Read, Glob and Grep (up to 25 turns) in the background to write one for the preamble.
 
 ## Standalone MCP server
 

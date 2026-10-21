@@ -998,7 +998,8 @@ async function runAgentOnce(opts, task, broadcast, agentId) {
       type: 'stdio',
       command: 'uvx',
       args: [
-        '--from', 'git+https://github.com/oraios/serena',
+        // Pinned to a commit (the v2.1.0 tag) so a new push upstream can't change what runs here.
+        '--from', 'git+https://github.com/oraios/serena@5e4f5cd173c7ff3eed37ee3f1de6c266b937c5dc',
         'serena', 'start-mcp-server',
         '--context', 'claude-code',
         '--project', cwd,

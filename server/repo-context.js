@@ -51,7 +51,7 @@ async function getGitSha(repoPath) {
 }
 
 /** Initialize repo context — loads AGENTS.md and repo wiki on server start. */
-export async function initRepoContext(repoPath) {
+export async function initRepoContext(repoPath, { generateWiki = true } = {}) {
   const agentsMd = await loadAgentsMd(repoPath);
   const gitSha = await getGitSha(repoPath);
 
@@ -73,7 +73,7 @@ export async function initRepoContext(repoPath) {
   console.log(`  ✦ Repo context loaded: AGENTS.md=${agentsMd ? 'yes' : 'no'} wiki=${repoWiki ? 'cached' : 'pending'} learned=${_cache.learnedMd ? 'yes' : 'no'}`);
 
   // If no cached wiki, generate one in the background (non-blocking)
-  if (!repoWiki) {
+  if (!repoWiki && generateWiki) {
     setImmediate(() => {
       generateRepoWiki(repoPath).catch(err => {
         console.warn('[repo-context] Background wiki generation failed:', err.message);

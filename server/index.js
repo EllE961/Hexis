@@ -54,12 +54,17 @@ const stateStore = initStateStore(REPO_PATH);
 await stateStore.load();
 console.log(`  ✦ State loaded: ${stateStore.getTasks().length} tasks, ${stateStore.getRuns().length} runs`);
 
+// Opening a project should not start an agent on its own: agents load the project's
+// .claude settings (including hooks) and cost tokens. The SDK warmup and the repo wiki
+// only run at startup when HEXIS_BACKGROUND_AGENTS=1.
+const BACKGROUND_AGENTS = process.env.HEXIS_BACKGROUND_AGENTS === '1';
+
 // Initialize repo context (AGENTS.md, repo wiki, cached preamble for agents)
-await initRepoContext(REPO_PATH);
+await initRepoContext(REPO_PATH, { generateWiki: BACKGROUND_AGENTS });
 
 // Fire-and-forget SDK warmup — kills first-turn cold start on chat mode.
 // Runs in the background, doesn't block listen(). See agent-orchestrator.warmupSdk.
-warmupSdk(REPO_PATH).catch(() => {});
+if (BACKGROUND_AGENTS) warmupSdk(REPO_PATH).catch(() => {});
 
 // SSE clients
 const sseClients = new Set();

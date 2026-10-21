@@ -247,6 +247,7 @@ claude mcp add hexis -- node /path/to/hexis/mcp-server.js /path/to/your/project
 | `HEXIS_HOST` | `127.0.0.1` | Address the API binds to. |
 | `HEXIS_ALLOWED_ORIGINS` | `http://localhost:5173`, `http://127.0.0.1:5173` and the Tauri origins | Comma-separated Origin allow-list. |
 | `HEXIS_DISABLE_SERENA` | unset | `1` stops agents from starting the Serena MCP server. |
+| `HEXIS_BACKGROUND_AGENTS` | unset | `1` warms up the SDK and builds the repo summary at startup. Both are model calls made before you ask for anything. |
 | `GITHUB_TOKEN` | unset | Optional, raises the GitHub search rate limit for research agents. |
 
 Claude access goes through the Claude Code CLI that ships inside `@anthropic-ai/claude-agent-sdk` (0.2.98). Hexis
@@ -286,13 +287,12 @@ protected-file hook only covers the Write and Edit tools, not Bash. Agents also 
 `AGENTS.md` and `.claude/` settings. Only point Hexis at projects you trust, and commit before you start a run. Typing
 a task into the task board starts a run as soon as one of the three slots is free.
 
-Two model calls happen without you asking. When the server starts it sends a one-turn "ping" to warm up the SDK, and
-when there is no cached repo summary for the current HEAD it runs a Sonnet agent (Read, Glob and Grep only, up to 25
-turns) to write one. The summary is cached per commit in `~/.hexis/wiki-<hash>.json`, so it runs again after HEAD
-moves. Research agents send queries to DuckDuckGo and fetch pages through `r.jina.ai`, besides the GitHub, Hacker
-News, arXiv and npm APIs. Planner, coder and reviewer agents start Serena with
-`uvx --from git+https://github.com/oraios/serena`, an unpinned install from GitHub; `HEXIS_DISABLE_SERENA=1` turns
-that off.
+Opening a project doesn't start an agent. With `HEXIS_BACKGROUND_AGENTS=1` the server sends a one-turn "ping" at
+startup to warm up the SDK, and when there is no cached repo summary for the current HEAD it runs a Sonnet agent (Read,
+Glob and Grep only, up to 25 turns) to write one into `~/.hexis/wiki-<hash>.json`. Without the flag, agents run without
+that summary. Research agents send queries to DuckDuckGo and fetch pages through `r.jina.ai`, besides the GitHub,
+Hacker News, arXiv and npm APIs. Planner, coder and reviewer agents start Serena with `uvx`, pinned to the commit behind
+its v2.1.0 tag; `HEXIS_DISABLE_SERENA=1` turns that off.
 
 ## Repository map
 

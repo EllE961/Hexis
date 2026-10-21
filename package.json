@@ -45,7 +45,6 @@
     "@vscode/codicons": "^0.0.45",
     "chokidar": "^4.0.3",
     "codemirror": "^6.0.2",
-    "cors": "^2.8.5",
     "express": "^4.21.2",
     "gray-matter": "^4.0.3",
     "lucide-react": "^1.7.0",

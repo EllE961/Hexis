@@ -1,6 +1,5 @@
 import express from 'express';
-import cors from 'cors';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, relative, isAbsolute, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFile, access, readFile } from 'fs/promises';
 import { execSync, exec, spawn } from 'child_process';
@@ -25,9 +24,27 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Target path: CLI arg > env var > parent of this server dir
 const REPO_PATH = (process.argv[2] || process.env.HEXIS_TARGET || resolve(__dirname, '..')).replace(/\\/g, '/');
 const PORT = parseInt(process.env.HEXIS_PORT || '3001', 10);
+const HOST = process.env.HEXIS_HOST || '127.0.0.1';
+
+// This API runs shell commands, writes files and drives git, so it only answers the Hexis UI on
+// this machine. The Host check blocks DNS rebinding; the Origin and Sec-Fetch-Site checks block
+// other websites open in the same browser from calling it.
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+const ALLOWED_ORIGINS = new Set(
+  (process.env.HEXIS_ALLOWED_ORIGINS
+    || 'http://localhost:5173,http://127.0.0.1:5173,tauri://localhost,http://tauri.localhost,https://tauri.localhost')
+    .split(',').map(o => o.trim()).filter(Boolean),
+);
 
 const app = express();
-app.use(cors());
+app.use((req, res, next) => {
+  const hostname = (req.headers.host || '').replace(/:\d+$/, '');
+  if (!LOCAL_HOSTNAMES.has(hostname)) return res.status(403).json({ error: 'Forbidden host' });
+  const origin = req.headers.origin;
+  if (origin && !ALLOWED_ORIGINS.has(origin)) return res.status(403).json({ error: 'Forbidden origin' });
+  if (req.headers['sec-fetch-site'] === 'cross-site') return res.status(403).json({ error: 'Forbidden' });
+  next();
+});
 app.use(express.json({ limit: '5mb' }));
 
 initGit(REPO_PATH);
@@ -52,8 +69,9 @@ function broadcast(data) {
 }
 
 function isPathSafe(filePath) {
-  const full = resolve(REPO_PATH, filePath);
-  return full.startsWith(REPO_PATH.replace(/\//g, '\\')) || full.startsWith(REPO_PATH);
+  // relative() rather than a prefix check, so a sibling like `../Hexis-other` can't pass
+  const rel = relative(resolve(REPO_PATH), resolve(REPO_PATH, filePath));
+  return !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep);
 }
 
 // ─── Graph ───
@@ -1618,8 +1636,8 @@ startWatcher(REPO_PATH, (delta) => {
 
 // ─── Start ───
 
-app.listen(PORT, () => {
-  console.log(`\n  ✦ Hexis server running at http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`\n  ✦ Hexis server running at http://${HOST}:${PORT}`);
   console.log(`  ✦ Watching: ${REPO_PATH}`);
-  console.log(`  ✦ SSE endpoint: http://localhost:${PORT}/events\n`);
+  console.log(`  ✦ SSE endpoint: http://${HOST}:${PORT}/events\n`);
 });

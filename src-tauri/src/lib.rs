@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -77,16 +77,40 @@ fn get_groups(state: State<AppState>) -> Result<Vec<GroupInfo>, String> {
 }
 
 /// Read a file's content
+/// Resolve `.` and `..` without touching the filesystem, so paths that don't exist yet
+/// (create, write, rename targets) normalize the same way as existing ones.
+fn normalize(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+/// Join `path` onto the project root and refuse anything that lands outside it.
+/// `Path::starts_with` compares components without resolving `..`, so the check has to run
+/// on the normalized path or `src/../../secret` slips through.
+fn join_inside(project: &Path, path: &str) -> Result<PathBuf, String> {
+    let root = normalize(project).ok_or("Bad project path")?;
+    match normalize(&root.join(path)) {
+        Some(full) if full.starts_with(&root) => Ok(full),
+        _ => Err("Path outside project".to_string()),
+    }
+}
+
 #[tauri::command]
 fn read_file(path: String, state: State<AppState>) -> Result<String, String> {
     let project = state.project_path.lock().unwrap();
     let project_path = project.as_ref().ok_or("No project loaded")?;
-    let full_path = project_path.join(&path);
-
-    // Security: ensure path is within project
-    if !full_path.starts_with(project_path) {
-        return Err("Path outside project".to_string());
-    }
+    let full_path = join_inside(project_path, &path)?;
 
     std::fs::read_to_string(&full_path).map_err(|e| e.to_string())
 }
@@ -127,11 +151,7 @@ fn get_initial_workspace() -> Option<String> {
 fn write_file(path: String, content: String, state: State<AppState>) -> Result<(), String> {
     let project = state.project_path.lock().unwrap();
     let project_path = project.as_ref().ok_or("No project loaded")?;
-    let full_path = project_path.join(&path);
-
-    if !full_path.starts_with(project_path) {
-        return Err("Path outside project".to_string());
-    }
+    let full_path = join_inside(project_path, &path)?;
 
     // Ensure parent directory exists so callers can write to nested
     // paths like `.hexis/layout.json` without a separate mkdir step.
@@ -152,11 +172,7 @@ fn resolve_project_path(
 ) -> Result<PathBuf, String> {
     let project = state.project_path.lock().unwrap();
     let project_path = project.as_ref().ok_or("No project loaded")?;
-    let full = project_path.join(path);
-    if !full.starts_with(project_path) {
-        return Err("Path outside project".to_string());
-    }
-    Ok(full)
+    join_inside(project_path, path)
 }
 
 /// Create a new file with optional content. Fails if it already exists.
@@ -533,4 +549,21 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hexis");
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn join_inside_keeps_paths_in_the_project() {
+        let root = Path::new("/work/proj");
+        assert!(join_inside(root, "src/main.rs").is_ok());
+        assert!(join_inside(root, "src/../README.md").is_ok());
+        assert!(join_inside(root, ".hexis/layout.json").is_ok());
+        assert!(join_inside(root, "/work/proj/src/main.rs").is_ok());
+        assert!(join_inside(root, "../proj-other/x").is_err());
+        assert!(join_inside(root, "src/../../secret").is_err());
+        assert!(join_inside(root, "/etc/passwd").is_err());
+    }
 }

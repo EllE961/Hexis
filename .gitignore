@@ -1,10 +1,9 @@
+# Dependencies and build output
 node_modules/
 dist/
-
-# Rust / Tauri build artifacts
 src-tauri/target/
 
-# Editor / OS junk
+# Editor and OS files
 .DS_Store
 Thumbs.db
 *.log
@@ -13,26 +12,19 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Environment + secrets (never commit)
+# Secrets
 .env
 .env.*
 !.env.example
 
-# Serena MCP cache (runtime state, not source)
-.serena/cache/
-.serena/project.local.yml
+# Local tool state
+.claude/
+.serena/
 
-# ─── Hexis IDE runtime artifacts ───
-# Everything Hexis writes into a project's `.hexis/` folder that's
-# regenerated on demand. If you use Hexis on YOUR project, copy this
-# block into your project's .gitignore.
-#
-# Kept (versioned): .hexis/memories/learned.md — cross-run conventions
-# hex grid group positions cache
-.hexis/layout.json
-# per-agent-run state snapshots
-.hexis/state-*.json
-# generated per-run research reports
-.hexis/memories/research/
-# episodic memory per run
-.hexis/memories/runs/
+# Hexis runtime files. Hexis writes these into whatever project it opens,
+# including this repo when HEXIS_TARGET is unset. Only the conventions file
+# the reviewers maintain is worth keeping.
+.hexis/*
+!.hexis/memories/
+.hexis/memories/*
+!.hexis/memories/learned.md

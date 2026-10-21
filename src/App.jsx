@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import HexCanvas from './components/HexGrid/HexCanvas.jsx';
-import EditorPanel from './components/Editor/EditorPanel.jsx';
+import EditorPanel from './components/editor/EditorPanel.jsx';
 import SearchPanel from './components/search/SearchPanel.jsx';
 import BookmarksPanel from './components/panels/BookmarksPanel.jsx';
 import FileTreePanel from './components/panels/FileTreePanel.jsx';
@@ -9,7 +9,7 @@ import GitPanel from './components/GitPanel/GitPanel.jsx';
 import AIPanel from './components/AIPanel/AIPanel.jsx';
 import ChatPanel from './components/ChatPanel/ChatPanel.jsx';
 import MemoryPanel from './components/MemoryPanel/MemoryPanel.jsx';
-import HistoryTimeline from './components/Timeline/HistoryTimeline.jsx';
+import HistoryTimeline from './components/timeline/HistoryTimeline.jsx';
 import TerminalPanel from './components/Terminal/TerminalPanel.jsx';
 import CommandPalette from './components/CommandPalette/CommandPalette.jsx';
 import DockContainer from './components/dock/DockContainer.jsx';
